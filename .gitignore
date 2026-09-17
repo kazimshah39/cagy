@@ -1,0 +1,42 @@
+# Local reference repository (read-only)
+.help/
+
+# Build outputs and binaries
+/cagy
+bin/
+build/
+dist/
+*.exe
+*.tar.gz
+checksums.txt
+
+# Go test and coverage artifacts
+*.test
+coverage.out
+coverage.html
+profile.out
+go.work
+go.work.sum
+
+# Secrets, private certificates, and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# Logs and test artifacts
+*.log
+*.tmp
+local-release/
+test-bin/

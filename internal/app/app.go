@@ -29,11 +29,13 @@ const (
 )
 
 const supervisorPrompt = `You are the Codex supervisor. The visible agy agent in the right Herdr pane is the developer.
-Delegate implementation work safely through stdin so task text is never interpolated into a shell command. Use a single-quoted heredoc, for example:
-cat <<'CAGY_TASK' | cagy ask --stdin
-<clear development task>
-CAGY_TASK
-Do not edit the same files while agy is working. After agy finishes, inspect the changes, review correctness and security, and run relevant tests. Send corrections through another cagy ask when needed. Use current official web documentation for dependencies and external APIs. Give the final result to the user in clear, simple words.`
+Delegate implementation work using the native cagy MCP tools. Follow this exact workflow:
+1. Inspect task state with task_status before starting new work.
+2. Delegate the task with delegate_task(task="..."). Task text is sent literally without shell interpolation.
+3. Review the developer's changes, test execution, correctness, and security.
+4. Call acknowledge_task(receipt="...") only after the result is received and in context.
+5. If a session or tool call is interrupted, use recover_task to retrieve the completed answer without resubmitting.
+Shell CLI commands (such as cagy ask --stdin) are for emergency and manual compatibility only; always prefer the native MCP tools. Do not edit the same files while agy is working. Use current official web documentation for dependencies and external APIs. Give the final result to the user in clear, simple words.`
 
 // App owns command parsing and the fixed cagy workflow.
 type App struct {
@@ -54,6 +56,7 @@ type App struct {
 	developerPoll         time.Duration
 	agentStopTimeout      time.Duration
 	configureSidebar      func(context.Context, bool) error
+	resolveExecutable     func() (string, error)
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
@@ -74,6 +77,9 @@ func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 		missingTranscriptWait: 30 * time.Second,
 		developerPoll:         time.Second,
 		agentStopTimeout:      10 * time.Second,
+	}
+	application.resolveExecutable = func() (string, error) {
+		return resolveExecutable(os.Executable)
 	}
 	application.configureSidebar = func(ctx context.Context, showAgents bool) error {
 		if showAgents {
@@ -123,6 +129,11 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("unknown cagy ask option: %s", args[1])
 		}
 		return a.ask(ctx, strings.Join(args[1:], " "))
+	case "mcp-server":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: cagy mcp-server")
+		}
+		return a.serveMCP(ctx)
 	case "stop":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cagy stop")
@@ -165,12 +176,16 @@ Usage:
   cagy doctor
   cagy stop
 
-Internal supervisor command:
-  cagy ask --stdin`)
+Compatibility and emergency fallback command:
+  cagy ask --stdin
+
+Note: Codex supervisor interacts with agy via native MCP tools (delegate_task,
+task_status, recover_task, acknowledge_task). Already-running Codex supervisor
+sessions must be restarted (cagy stop; cagy) to receive the per-invocation bridge.`)
 }
 
 func (a *App) printAskHelp() {
-	fmt.Fprintln(a.stdout, `cagy ask - send one task to the visible agy developer
+	fmt.Fprintln(a.stdout, `cagy ask - send one task to the visible agy developer (compatibility and emergency fallback)
 
 Usage:
   cagy ask --stdin
@@ -199,6 +214,16 @@ func readTaskInput(reader io.Reader) (string, error) {
 	return task, nil
 }
 
+func validateTaskString(task string) error {
+	if len(task) > maxTaskInputBytes {
+		return fmt.Errorf("task exceeds 1 MiB")
+	}
+	if strings.TrimSpace(task) == "" {
+		return fmt.Errorf("task cannot be empty")
+	}
+	return nil
+}
+
 func resolveProject(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -218,8 +243,8 @@ func resolveProject(path string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
-func codexArgs(project string) []string {
-	return []string{
+func codexArgs(project string, mcpOverride ...string) []string {
+	args := []string{
 		"codex",
 		"--yolo",
 		"--dangerously-bypass-hook-trust",
@@ -228,9 +253,12 @@ func codexArgs(project string) []string {
 		codexProjectTrustOverride(project),
 		"-c",
 		codexDeveloperInstructionsOverride(),
-		"-C",
-		project,
 	}
+	if len(mcpOverride) > 0 && mcpOverride[0] != "" {
+		args = append(args, "-c", mcpOverride[0])
+	}
+	args = append(args, "-C", project)
+	return args
 }
 
 // codexProjectTrustOverride avoids Codex's first-run directory prompt for this

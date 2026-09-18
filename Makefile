@@ -51,8 +51,12 @@ check-scripts: ## Verify shell script syntax
 test-installer: ## Run end-to-end installer tests with local fake release server
 	./scripts/test-installer.sh
 
+.PHONY: mod-check
+mod-check: ## Verify module integrity
+	go mod verify
+
 .PHONY: verify
-verify: fmt-check vet test-race check-scripts test-installer ## Run all verification checks
+verify: fmt-check mod-check vet test-race check-scripts test-installer ## Run all verification checks
 
 VERSION ?= 0.1.0
 

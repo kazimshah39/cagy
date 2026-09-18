@@ -129,13 +129,51 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) error {
 		return fmt.Errorf("check existing developer: %w", getErr)
 	}
 
+	binPath, err := a.resolveExecutable()
+	if err != nil {
+		return fmt.Errorf("resolve cagy executable: %w", err)
+	}
+	mcpEnv, err := a.buildMCPEnv(current, developerName, developer.PaneID, project)
+	if err != nil {
+		return err
+	}
+	mcpOverride, err := codexMCPServerOverride(binPath, mcpEnv)
+	if err != nil {
+		return fmt.Errorf("configure codex mcp bridge: %w", err)
+	}
+
 	env := mergeEnv(a.environ(), map[string]string{
 		"CAGY_PROJECT_DIR":        project,
 		"CAGY_DEVELOPER":          developerName,
 		"CAGY_DEVELOPER_PANE_ID":  developer.PaneID,
 		"CAGY_SUPERVISOR_PANE_ID": current.PaneID,
 	})
-	return a.runner.RunAttached(codexArgs(project), env)
+	return a.runner.RunAttached(codexArgs(project, mcpOverride), env)
+}
+
+func (a *App) buildMCPEnv(current herdr.PaneInfo, developerName, developerPaneID, project string) (map[string]string, error) {
+	socketPath := strings.TrimSpace(a.getenv("HERDR_SOCKET_PATH"))
+	if socketPath == "" {
+		return nil, fmt.Errorf("herdr socket path is missing")
+	}
+	mcpEnv := map[string]string{
+		"HERDR_ENV":          "1",
+		"HERDR_WORKSPACE_ID": current.WorkspaceID,
+		// The MCP child process uses env_clear, so HERDR_PANE_ID would not be
+		// inherited. We explicitly pass the supervisor pane so requireHerdr
+		// passes inside the stdio subprocess. CAGY_SUPERVISOR_PANE_ID carries
+		// the same value and is the authoritative identity there.
+		"HERDR_PANE_ID":           current.PaneID,
+		"HERDR_SOCKET_PATH":       socketPath,
+		"CAGY_SUPERVISOR_PANE_ID": current.PaneID,
+		"CAGY_DEVELOPER":          developerName,
+		"CAGY_DEVELOPER_PANE_ID":  developerPaneID,
+		"CAGY_PROJECT_DIR":        project,
+	}
+	if v := strings.TrimSpace(current.TabID); v != "" {
+		mcpEnv["HERDR_TAB_ID"] = v
+	}
+	return mcpEnv, nil
 }
 
 func (a *App) doctor(ctx context.Context) error {
@@ -155,6 +193,7 @@ func (a *App) doctor(ctx context.Context) error {
 		check(executable+" on PATH", err)
 	}
 	check("Codex YOLO flag", a.commandSucceeds(ctx, "codex", "--yolo", "--help"))
+	check("Codex MCP support", a.helpContains(ctx, []string{"codex", "mcp", "--help"}, "list"))
 	check("agy YOLO, exact resume, and quota probe flags", a.helpContains(ctx, []string{"agy", "--help"}, "--dangerously-skip-permissions", "accept-edits", "--conversation", "--print", "--output-format", "--print-timeout"))
 	check("Herdr agent automation", a.helpContains(ctx, []string{"herdr", "agent"}, "agent start", "agent prompt", "agent wait", "agy"))
 	check("Herdr pane automation", a.helpContains(ctx, []string{"herdr", "pane"}, "pane split", "pane run", "pane close", "pane report-metadata"))
@@ -181,110 +220,161 @@ func (a *App) doctor(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) ask(ctx context.Context, task string) error {
+type taskDelivery struct {
+	output    string
+	developer herdr.AgentInfo
+	receipt   string
+}
+
+func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, error) {
 	contextInfo, err := a.context()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	lock, err := acquireLock(a.stateDir, contextInfo.developer, a.now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer lock.release()
 
 	if err := a.ensureNoInterruptedTask(ctx, contextInfo); err != nil {
-		return err
+		return nil, err
 	}
 
 	developer, err := a.ensureDeveloper(ctx, contextInfo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch developer.AgentStatus {
 	case "idle", "done":
 	case "working":
-		return fmt.Errorf("developer is busy")
+		return nil, fmt.Errorf("developer is busy")
 	case "blocked":
-		return fmt.Errorf("developer is blocked; check the right pane")
+		return nil, fmt.Errorf("developer is blocked; check the right pane")
 	default:
-		return fmt.Errorf("developer is not ready (%s); check the right pane", developer.AgentStatus)
+		return nil, fmt.Errorf("developer is not ready (%s); check the right pane", developer.AgentStatus)
 	}
 
 	exhausted, _ := a.agyQuotaExhausted(ctx)
 	checkpoint, err := a.transcriptCheckpoint(developer)
 	if err != nil {
-		return fmt.Errorf("prepare agy transcript: %w", err)
+		return nil, fmt.Errorf("prepare agy transcript: %w", err)
 	}
 	phase := taskPhaseSubmitting
 	if exhausted {
 		phase = taskPhaseRecovering
 	}
 	if err := a.beginTaskTracking(contextInfo, developer, task, checkpoint, phase); err != nil {
-		return fmt.Errorf("prepare durable task state: %w", err)
+		return nil, fmt.Errorf("prepare durable task state: %w", err)
 	}
+
+	var finalOutput string
+	var finalDev herdr.AgentInfo
 
 	if exhausted {
 		fmt.Fprintln(a.stderr, "cagy: agy quota is low; starting visible account recovery before task submission")
-		recoveredOutput, recoverErr := a.recover(ctx, contextInfo, developer, task, false)
+		recoveredOutput, recoveredDev, recoverErr := a.recover(ctx, contextInfo, developer, task, false)
 		if recoverErr != nil {
 			a.warnTrackedPhase(taskPhaseUncertain, developer)
-			return recoverErr
+			return nil, recoverErr
 		}
-		return a.deliverTrackedOutput(strings.TrimSpace(recoveredOutput), developer)
+		finalOutput = strings.TrimSpace(recoveredOutput)
+		finalDev = recoveredDev
+	} else {
+		before, _ := a.herdr.ReadAgent(ctx, contextInfo.developer, 400)
+		result, taskErr := a.runDeveloperTask(ctx, contextInfo.developer, task, before, checkpoint)
+		if result.quotaExhausted {
+			recoveryDeveloper := developer
+			if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
+				recoveryDeveloper = result.agent
+			}
+			a.warnTrackedPhase(taskPhaseRecovering, recoveryDeveloper)
+			fmt.Fprintln(a.stderr, "cagy: agy quota was exhausted; starting visible account recovery")
+			recoveredOutput, recoveredDev, recoverErr := a.recover(ctx, contextInfo, recoveryDeveloper, task, true)
+			if recoverErr != nil {
+				a.warnTrackedPhase(taskPhaseUncertain, recoveryDeveloper)
+				return nil, recoverErr
+			}
+			finalOutput = strings.TrimSpace(recoveredOutput)
+			finalDev = recoveredDev
+		} else if taskErr != nil {
+			a.warnTrackedPhase(taskPhaseUncertain, result.agent)
+			if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run cagy doctor: %w", taskErr)
+			}
+			return nil, fmt.Errorf("agy task failed; run cagy doctor before sending another task: %w", taskErr)
+		} else {
+			a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
+			if result.agent.AgentStatus == "blocked" {
+				a.warnTrackedPhase(taskPhaseBlocked, result.agent)
+				return nil, fmt.Errorf("developer is blocked; check the right pane")
+			}
+			if result.output == "" {
+				a.warnTrackedPhase(taskPhaseUncertain, result.agent)
+				return nil, fmt.Errorf("agy finished without readable output; run cagy doctor")
+			}
+			finalOutput = result.output
+			finalDev = result.agent
+		}
 	}
 
-	before, _ := a.herdr.ReadAgent(ctx, contextInfo.developer, 400)
-	result, taskErr := a.runDeveloperTask(ctx, contextInfo.developer, task, before, checkpoint)
-	if result.quotaExhausted {
-		recoveryDeveloper := developer
-		if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
-			recoveryDeveloper = result.agent
-		}
-		a.warnTrackedPhase(taskPhaseRecovering, recoveryDeveloper)
-		fmt.Fprintln(a.stderr, "cagy: agy quota was exhausted; starting visible account recovery")
-		recoveredOutput, recoverErr := a.recover(ctx, contextInfo, recoveryDeveloper, task, true)
-		if recoverErr != nil {
-			a.warnTrackedPhase(taskPhaseUncertain, recoveryDeveloper)
-			return recoverErr
-		}
-		return a.deliverTrackedOutput(strings.TrimSpace(recoveredOutput), result.agent)
+	if strings.TrimSpace(finalOutput) == "" {
+		a.warnTrackedPhase(taskPhaseUncertain, finalDev)
+		return nil, fmt.Errorf("agy finished without readable output")
 	}
-	if taskErr != nil {
-		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
-		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
-			return fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run cagy doctor: %w", taskErr)
-		}
-		return fmt.Errorf("agy task failed; run cagy doctor before sending another task: %w", taskErr)
+	if err := a.setTrackedPhase(taskPhaseCompleted, finalDev); err != nil {
+		return nil, fmt.Errorf("save completed task state before delivering output: %w", err)
 	}
-	a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
-	if result.agent.AgentStatus == "blocked" {
-		a.warnTrackedPhase(taskPhaseBlocked, result.agent)
-		return fmt.Errorf("developer is blocked; check the right pane")
+
+	receipt := ""
+	if a.activeTask != nil {
+		receipt = a.activeTask.DeliveryReceipt
 	}
-	if result.output == "" {
-		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
-		return fmt.Errorf("agy finished without readable output; run cagy doctor")
-	}
-	return a.deliverTrackedOutput(result.output, result.agent)
+
+	return &taskDelivery{
+		output:    finalOutput,
+		developer: finalDev,
+		receipt:   receipt,
+	}, nil
 }
 
-func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo) error {
+func (a *App) ask(ctx context.Context, task string) error {
+	delivery, err := a.delegateTask(ctx, task)
+	if err != nil {
+		return err
+	}
+	return a.deliverTrackedOutput(delivery.output, delivery.developer, delivery.receipt)
+}
+
+func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo, receiptOverride ...string) error {
 	if strings.TrimSpace(output) == "" {
 		a.warnTrackedPhase(taskPhaseUncertain, developer)
 		return fmt.Errorf("agy finished without readable output")
 	}
-	if err := a.setTrackedPhase(taskPhaseCompleted, developer); err != nil {
-		return fmt.Errorf("save completed task state before delivering output: %w", err)
+	if a.activeTask == nil || a.activeTask.Phase != taskPhaseCompleted {
+		if err := a.setTrackedPhase(taskPhaseCompleted, developer); err != nil {
+			return fmt.Errorf("save completed task state before delivering output: %w", err)
+		}
+	}
+	receipt := ""
+	if len(receiptOverride) > 0 && receiptOverride[0] != "" {
+		receipt = receiptOverride[0]
+	} else if a.activeTask != nil {
+		receipt = a.activeTask.DeliveryReceipt
 	}
 	if _, err := fmt.Fprintln(a.stdout, output); err != nil {
 		return fmt.Errorf("write agy response; recover it with cagy ask --recover: %w", err)
 	}
-	if a.activeTask != nil {
+	if receipt != "" {
+		if err := a.acknowledgeTask(context.Background(), receipt); err != nil {
+			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run cagy doctor before new work: %w", err)
+		}
+	} else if a.activeTask != nil {
 		if err := a.removeTaskJournal(a.activeTask.Developer); err != nil {
 			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run cagy doctor before new work: %w", err)
 		}
+		a.activeTask = nil
 	}
-	a.activeTask = nil
 	return nil
 }
 
@@ -358,7 +448,11 @@ func (a *App) requireHerdr() error {
 	if a.getenv("HERDR_ENV") != "1" {
 		return fmt.Errorf("run cagy from a shell pane inside Herdr")
 	}
-	if a.getenv("HERDR_WORKSPACE_ID") == "" || a.getenv("HERDR_PANE_ID") == "" {
+	paneID := a.getenv("HERDR_PANE_ID")
+	if paneID == "" {
+		paneID = a.getenv("CAGY_SUPERVISOR_PANE_ID")
+	}
+	if a.getenv("HERDR_WORKSPACE_ID") == "" || paneID == "" {
 		return fmt.Errorf("herdr pane context is missing")
 	}
 	return nil
@@ -434,6 +528,74 @@ func (a *App) checkSessionHealth(ctx context.Context) error {
 		return fmt.Errorf("agy developer is missing; cagy ask can repair pane %s", pane.PaneID)
 	}
 	return fmt.Errorf("agy developer is missing; cagy ask can create a replacement")
+}
+
+func (a *App) getDeveloperStatus(ctx context.Context) (*DeveloperStatusOutput, error) {
+	info, err := a.context()
+	if err != nil {
+		return nil, err
+	}
+	supervisor, err := a.supervisorPane(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+	developer, err := a.herdr.GetAgent(ctx, info.developer)
+	if err != nil {
+		if herdr.IsCode(err, "agent_not_found") {
+			return &DeveloperStatusOutput{
+				Developer:    info.developer,
+				PaneID:       "",
+				Status:       "not_running",
+				Project:      info.project,
+				SessionReady: false,
+				TaskSummary:  "developer is not running",
+			}, nil
+		}
+		return nil, fmt.Errorf("find agy developer: %w", err)
+	}
+
+	pane, validateErr := a.validatedDeveloperPane(ctx, developer, info, supervisor)
+	if validateErr != nil {
+		return nil, validateErr
+	}
+
+	sessionReady := false
+	liveSessionID, sessionErr := exactAgySessionID(developer)
+	if sessionErr == nil {
+		savedSessionID := strings.TrimSpace(pane.Tokens["cagy_session"])
+		if savedSessionID == liveSessionID && pane.Tokens[agySessionStateToken] == agySessionStateReady {
+			sessionReady = true
+		}
+	} else {
+		pendingFresh := (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["cagy_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
+		if pendingFresh {
+			sessionReady = true
+		}
+	}
+
+	taskSummary := "no active task"
+	record, exists, loadErr := a.loadTaskJournal(info.developer)
+	if loadErr != nil {
+		fmt.Fprintf(a.stderr, "cagy warning: task journal is unreadable: %v\n", loadErr)
+		taskSummary = "interrupted task state is unreadable; run cagy doctor"
+	} else if exists {
+		inspection, inspectErr := a.inspectTaskJournal(ctx, info, record)
+		if inspectErr != nil {
+			fmt.Fprintf(a.stderr, "cagy warning: task state is invalid: %v\n", inspectErr)
+			taskSummary = "interrupted task state is invalid; run cagy doctor"
+		} else {
+			taskSummary = fmt.Sprintf("task is %s: %s", inspection.kind, inspection.message)
+		}
+	}
+
+	return &DeveloperStatusOutput{
+		Developer:    info.developer,
+		PaneID:       developer.PaneID,
+		Status:       developer.AgentStatus,
+		Project:      info.project,
+		SessionReady: sessionReady,
+		TaskSummary:  taskSummary,
+	}, nil
 }
 
 func (a *App) checkCurrentPane(ctx context.Context) error {

@@ -50,12 +50,20 @@ func TestCodexArgsAlwaysUseYoloSearchAndInvocationTrust(t *testing.T) {
 	}
 }
 
-func TestSupervisorPromptUsesSafeStdinDelegation(t *testing.T) {
-	if !strings.Contains(supervisorPrompt, "cat <<'CAGY_TASK' | cagy ask --stdin") {
-		t.Fatalf("supervisor prompt lacks safe stdin delegation: %q", supervisorPrompt)
+func TestSupervisorPromptNativeToolWorkflow(t *testing.T) {
+	for _, tool := range []string{"delegate_task", "task_status", "acknowledge_task", "recover_task"} {
+		if !strings.Contains(supervisorPrompt, tool) {
+			t.Fatalf("supervisor prompt missing required native MCP tool %q: %q", tool, supervisorPrompt)
+		}
+	}
+	if strings.Contains(supervisorPrompt, "cat <<'CAGY_TASK'") {
+		t.Fatalf("supervisor prompt should not recommend heredoc as primary path: %q", supervisorPrompt)
 	}
 	if strings.Contains(supervisorPrompt, `cagy ask "<`) {
 		t.Fatalf("supervisor prompt recommends unsafe quoted argv delegation: %q", supervisorPrompt)
+	}
+	if !strings.Contains(supervisorPrompt, "emergency and manual compatibility only") {
+		t.Fatalf("supervisor prompt should state CLI commands are for emergency/compatibility only: %q", supervisorPrompt)
 	}
 }
 
@@ -300,6 +308,7 @@ func TestStartCreatesVisibleDeveloperAndLaunchesCodex(t *testing.T) {
 		"HERDR_ENV":          "1",
 		"HERDR_WORKSPACE_ID": "w1",
 		"HERDR_PANE_ID":      "w1:p1",
+		"HERDR_SOCKET_PATH":  "/tmp/herdr.sock",
 	}
 	application.getenv = func(key string) string { return values[key] }
 	application.environ = func() []string { return []string{"PATH=/usr/bin"} }
@@ -315,6 +324,16 @@ func TestStartCreatesVisibleDeveloperAndLaunchesCodex(t *testing.T) {
 		if !contains(runner.attachedArgs, expected) {
 			t.Fatalf("missing %q in attached args %#v", expected, runner.attachedArgs)
 		}
+	}
+	hasMCPServer := false
+	for _, arg := range runner.attachedArgs {
+		if strings.Contains(arg, "mcp_servers.cagy=") {
+			hasMCPServer = true
+			break
+		}
+	}
+	if !hasMCPServer {
+		t.Fatalf("missing mcp_servers.cagy config in attached args %#v", runner.attachedArgs)
 	}
 	for _, expected := range []string{"CAGY_DEVELOPER=" + developer, "CAGY_DEVELOPER_PANE_ID=w1:p2", "CAGY_SUPERVISOR_PANE_ID=w1:p1", "CAGY_PROJECT_DIR=" + project} {
 		if !contains(runner.attachedEnv, expected) {
@@ -352,6 +371,7 @@ func TestStartShowAgentsUsesExpandedLabelsWhenReusingDeveloper(t *testing.T) {
 		"HERDR_ENV":          "1",
 		"HERDR_WORKSPACE_ID": "w1",
 		"HERDR_PANE_ID":      "w1:p1",
+		"HERDR_SOCKET_PATH":  "/tmp/herdr.sock",
 	})
 	application.environ = func() []string { return []string{"PATH=/usr/bin"} }
 
@@ -364,6 +384,137 @@ func TestStartShowAgentsUsesExpandedLabelsWhenReusingDeveloper(t *testing.T) {
 	}
 	if !contains(runner.attachedEnv, "CAGY_DEVELOPER_PANE_ID=w1:p2") {
 		t.Fatalf("missing reused developer pane in %#v", runner.attachedEnv)
+	}
+	hasMCPServer := false
+	for _, arg := range runner.attachedArgs {
+		if strings.Contains(arg, "mcp_servers.cagy=") {
+			hasMCPServer = true
+			break
+		}
+	}
+	if !hasMCPServer {
+		t.Fatalf("missing mcp_servers.cagy config in attached args %#v", runner.attachedArgs)
+	}
+}
+
+func TestStartFailsWhenExecutableUnsafe(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	developer := developerName("w1", "w1:p1")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
+		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","cwd":"` + project + `"}}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p1", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=supervisor"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p1", "--source", supervisorDisplaySource, "--agent", "codex", "--display-agent", compactSupervisorDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=developer"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+	}}
+	application := New(runner, os.Stdout, os.Stderr)
+	application.getenv = envGetter(map[string]string{
+		"HERDR_ENV":          "1",
+		"HERDR_WORKSPACE_ID": "w1",
+		"HERDR_PANE_ID":      "w1:p1",
+		"HERDR_SOCKET_PATH":  "/tmp/herdr.sock",
+	})
+	application.resolveExecutable = func() (string, error) {
+		return "", errors.New("unsafe binary")
+	}
+	err = application.start(context.Background(), project, false)
+	if err == nil || !strings.Contains(err.Error(), "resolve cagy executable: unsafe binary") {
+		t.Fatalf("expected unsafe binary error, got: %v", err)
+	}
+	if runner.attachedArgs != nil {
+		t.Fatal("runner.RunAttached must not be called when executable resolution fails")
+	}
+}
+
+func TestStartRequiresHerdrSocketPath(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	developer := developerName("w1", "w1:p1")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
+		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","cwd":"` + project + `"}}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p1", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=supervisor"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p1", "--source", supervisorDisplaySource, "--agent", "codex", "--display-agent", compactSupervisorDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=developer"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+	}}
+	application := New(runner, os.Stdout, os.Stderr)
+	application.getenv = envGetter(map[string]string{
+		"HERDR_ENV":          "1",
+		"HERDR_WORKSPACE_ID": "w1",
+		"HERDR_PANE_ID":      "w1:p1",
+		"HERDR_SOCKET_PATH":  "",
+	})
+	application.resolveExecutable = func() (string, error) {
+		return "/usr/local/bin/cagy", nil
+	}
+	err = application.start(context.Background(), project, false)
+	if err == nil || !strings.Contains(err.Error(), "herdr socket path is missing") {
+		t.Fatalf("expected missing socket path error, got: %v", err)
+	}
+	if runner.attachedArgs != nil {
+		t.Fatal("runner.RunAttached must not be called when socket path is missing")
+	}
+}
+
+func TestBuildMCPEnvAllowlistAndNoSecrets(t *testing.T) {
+	app := New(nil, nil, nil)
+	envVars := map[string]string{
+		"HERDR_SOCKET_PATH":     "/tmp/herdr.sock",
+		"ANTHROPIC_API_KEY":     "secret-key",
+		"OPENAI_API_KEY":        "secret-key-2",
+		"AWS_SECRET_ACCESS_KEY": "super-secret",
+		"PASSWORD":              "secret-pass",
+		"USER":                  "testuser",
+		"HOME":                  "/Users/testuser",
+	}
+	app.getenv = func(k string) string { return envVars[k] }
+	current := herdr.PaneInfo{
+		PaneID:      "w1:p1",
+		WorkspaceID: "w1",
+		TabID:       "w1:t1",
+	}
+
+	mcpEnv, err := app.buildMCPEnv(current, "cagy_dev_123", "w1:p2", "/Users/test/project")
+	if err != nil {
+		t.Fatalf("unexpected buildMCPEnv error: %v", err)
+	}
+
+	expectedKeys := map[string]string{
+		"HERDR_ENV":               "1",
+		"HERDR_WORKSPACE_ID":      "w1",
+		"HERDR_PANE_ID":           "w1:p1",
+		"HERDR_SOCKET_PATH":       "/tmp/herdr.sock",
+		"HERDR_TAB_ID":            "w1:t1",
+		"CAGY_SUPERVISOR_PANE_ID": "w1:p1",
+		"CAGY_DEVELOPER":          "cagy_dev_123",
+		"CAGY_DEVELOPER_PANE_ID":  "w1:p2",
+		"CAGY_PROJECT_DIR":        "/Users/test/project",
+	}
+
+	if len(mcpEnv) != len(expectedKeys) {
+		t.Fatalf("mcpEnv has %d keys, want %d: %#v", len(mcpEnv), len(expectedKeys), mcpEnv)
+	}
+	for k, wantVal := range expectedKeys {
+		if gotVal, ok := mcpEnv[k]; !ok || gotVal != wantVal {
+			t.Fatalf("key %q: got %q (ok=%v), want %q", k, gotVal, ok, wantVal)
+		}
+	}
+
+	for _, forbidden := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "PASSWORD", "USER", "HOME"} {
+		if _, ok := mcpEnv[forbidden]; ok {
+			t.Fatalf("forbidden/secret variable %q leaked into mcpEnv", forbidden)
+		}
 	}
 }
 
@@ -412,6 +563,52 @@ func TestAskReturnsOnlyNewDeveloperOutput(t *testing.T) {
 	}
 	if _, err := os.Stat(application.taskJournalPath(developer)); !os.IsNotExist(err) {
 		t.Fatalf("delivered task journal still exists: %v", err)
+	}
+}
+
+func TestDelegateTaskDoesNotWriteFinalAnswerToStdout(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	task := "Implement without stdout side effect"
+	brainRoot := t.TempDir()
+	writeAgyTranscript(t, brainRoot, testConversationID, task, "Direct delivery result.")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
+		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
+		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\nDirect delivery result.\n")},
+		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
+		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
+		sessionOwnershipStep("w1:p2", testConversationID),
+	}}
+	var stdout, stderr strings.Builder
+	application := New(runner, &stdout, &stderr)
+	application.stateDir = t.TempDir()
+	application.agyBrainRoot = brainRoot
+	application.transcriptWait = time.Second
+	application.getenv = envGetter(map[string]string{
+		"HERDR_ENV":               "1",
+		"HERDR_WORKSPACE_ID":      "w1",
+		"HERDR_PANE_ID":           "w1:p1",
+		"CAGY_SUPERVISOR_PANE_ID": "w1:p1",
+		"CAGY_DEVELOPER":          developer,
+		"CAGY_PROJECT_DIR":        project,
+	})
+
+	delivery, err := application.delegateTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	runner.assertDone()
+	if delivery.output != "Direct delivery result." {
+		t.Fatalf("expected delivery output %q, got %q", "Direct delivery result.", delivery.output)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("expected stdout to be empty, got: %q", got)
 	}
 }
 
@@ -731,6 +928,7 @@ func TestRunHelpAndUsageErrors(t *testing.T) {
 func TestDoctorChecksInstalledCapabilities(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: []runStep{
 		{want: []string{"codex", "--yolo", "--help"}, result: proc.Result{ExitCode: 0}},
+		{want: []string{"codex", "mcp", "--help"}, result: textResult("Commands:\n  list\n")},
 		{want: []string{"agy", "--help"}, result: textResult("--dangerously-skip-permissions --mode accept-edits --conversation --print --output-format --print-timeout")},
 		{want: []string{"herdr", "agent"}, result: proc.Result{ExitCode: 2, Stderr: "agent start agent prompt agent wait kinds: agy"}},
 		{want: []string{"herdr", "pane"}, result: proc.Result{ExitCode: 2, Stderr: "pane split pane run pane close pane report-metadata"}},
@@ -758,6 +956,37 @@ func TestDoctorChecksInstalledCapabilities(t *testing.T) {
 	if !strings.Contains(stdout.String(), "cagy is ready") {
 		t.Fatalf("doctor output=%q", stdout.String())
 	}
+}
+
+func TestDoctorFailsWhenCodexLacksMCPSupport(t *testing.T) {
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"codex", "--yolo", "--help"}, result: proc.Result{ExitCode: 0}},
+		{want: []string{"codex", "mcp", "--help"}, result: proc.Result{ExitCode: 1, Stderr: "error: unrecognized subcommand 'mcp'"}},
+		{want: []string{"agy", "--help"}, result: textResult("--dangerously-skip-permissions --mode accept-edits --conversation --print --output-format --print-timeout")},
+		{want: []string{"herdr", "agent"}, result: proc.Result{ExitCode: 2, Stderr: "agent start agent prompt agent wait kinds: agy"}},
+		{want: []string{"herdr", "pane"}, result: proc.Result{ExitCode: 2, Stderr: "pane split pane run pane close pane report-metadata"}},
+		{want: []string{"herdr", "pane", "report-metadata", "--help"}, result: textResult("--source --agent --display-agent --token")},
+		{want: []string{"herdr", "api", "schema", "--json"}, result: textResult("agent.view.set agent.view.clear")},
+		{want: []string{"agm", "help"}, result: textResult("refresh-all auto-switch")},
+		{want: []string{"agm", "auto-switch", "--help"}, result: textResult("--min")},
+		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
+		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}`)},
+	}}
+	var stdout strings.Builder
+	application := New(runner, &stdout, os.Stderr)
+	application.getenv = envGetter(map[string]string{
+		"HERDR_ENV":          "1",
+		"HERDR_WORKSPACE_ID": "w1",
+		"HERDR_PANE_ID":      "w1:p1",
+	})
+	err := application.doctor(context.Background())
+	if err == nil {
+		t.Fatal("expected doctor to fail when Codex lacks MCP support")
+	}
+	if !strings.Contains(stdout.String(), "✗ Codex MCP support") {
+		t.Fatalf("expected doctor output to show failed MCP check: %s", stdout.String())
+	}
+	runner.assertDone()
 }
 
 func TestStopClosesOnlyVerifiedDeveloperPane(t *testing.T) {
@@ -848,7 +1077,7 @@ func TestRecoveryStopsAfterTwoAttemptsAndKeepsOriginalDeveloper(t *testing.T) {
 	application.stateDir = t.TempDir()
 	tokens := []string{"refresh1", "switch1", "switch2"}
 	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
-	_, err := application.recover(context.Background(), info, agent, "task", true)
+	_, _, err := application.recover(context.Background(), info, agent, "task", true)
 	if err == nil || !strings.Contains(err.Error(), "original developer was kept") {
 		t.Fatalf("error=%v", err)
 	}
@@ -939,7 +1168,7 @@ func TestRecoveryRejectsUnhealthyOrUnreadableSwitchedAccountsWithoutStoppingDeve
 	}
 	tokens := []string{"switch1", "switch2"}
 	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
-	_, err := application.recover(context.Background(), info, agent, "task", true)
+	_, _, err := application.recover(context.Background(), info, agent, "task", true)
 	if err == nil || !strings.Contains(err.Error(), "verify switched agy account") {
 		t.Fatalf("error=%v", err)
 	}
@@ -1668,7 +1897,7 @@ func TestRecoveryFailsBeforeAGMMutationWhenExactSessionIsUnsafe(t *testing.T) {
 				{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
 			}}
 			app := New(runner, &strings.Builder{}, &strings.Builder{})
-			_, err := app.recover(context.Background(), info, expected, "task", true)
+			_, _, err := app.recover(context.Background(), info, expected, "task", true)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v", err)
 			}
@@ -1692,7 +1921,7 @@ func TestRecoveryRequiresSessionMetadataBeforeAGMMutation(t *testing.T) {
 	steps[len(steps)-1].result = jsonError("metadata_error", "metadata unavailable")
 	runner := &scriptedRunner{t: t, steps: steps}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})
-	_, err := app.recover(context.Background(), info, agent, "task", true)
+	_, _, err := app.recover(context.Background(), info, agent, "task", true)
 	if err == nil || !strings.Contains(err.Error(), "save agy conversation before quota recovery") {
 		t.Fatalf("error=%v", err)
 	}
@@ -1925,5 +2154,102 @@ func TestSessionHealthAcceptsVerifiedFreshPendingConversation(t *testing.T) {
 	if err := app.checkSessionHealth(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	runner.assertDone()
+}
+
+func TestDelegateTaskPreservesResumedSessionIdentityAfterQuotaRecovery(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	task := "Implement the first task with recovery"
+	brainRoot := t.TempDir()
+	marker := "__CAGY_SWITCH_switch1__"
+	steps := []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer", agySessionStateToken: agySessionStatePending})},
+		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
+		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.03, 0.9)},
+	}
+	steps = append(steps, pendingSessionCaptureSteps(developer, project, "w1:p2")...)
+	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
+	steps = append(steps, successfulAutoSwitchSteps("w1:p3", marker)...)
+	steps = append(steps,
+		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
+		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
+	)
+	steps = append(steps, confirmedCloseSteps("w1:p3")...)
+	steps = append(steps, restartFreshInPlaceSteps(developer, project, "w1:p2")...)
+	steps = append(steps,
+		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\n")},
+		runStep{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, before: func() {
+			writeAgyTranscript(t, brainRoot, testConversationID, task, "Completed first task after recovery.")
+		}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\nCompleted first task after recovery.\n")},
+		runStep{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
+		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
+		sessionOwnershipStep("w1:p2", testConversationID),
+		// Steps for inspectTaskJournal during recoverTask
+		runStep{want: []string{"herdr", "agent", "get", developer}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
+		runStep{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		runStep{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+	)
+
+	runner := &scriptedRunner{t: t, steps: steps}
+	var stdout strings.Builder
+	app := New(runner, &stdout, &strings.Builder{})
+	app.stateDir = t.TempDir()
+	app.agyBrainRoot = brainRoot
+	app.transcriptWait = time.Second
+	app.now = func() time.Time { return time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC) }
+	if err := app.recordAGMRefresh(app.now().Add(-30 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	app.token = func() (string, error) { return "switch1", nil }
+	app.getenv = cagyEnv(project, developer)
+
+	delivery, err := app.delegateTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("delegateTask failed: %v", err)
+	}
+	if delivery.output != "Completed first task after recovery." {
+		t.Fatalf("unexpected delivery output: %q", delivery.output)
+	}
+
+	// Verify journal on disk has the RESUMED session, NOT the initial empty one!
+	record, exists, err := app.loadTaskJournal(developer)
+	if err != nil || !exists {
+		t.Fatalf("journal should exist on disk, exists=%v, err=%v", exists, err)
+	}
+	if record.SessionID != testConversationID {
+		t.Fatalf("journal SessionID = %q, want resumed session %q (was overwritten by pre-recovery agent!)", record.SessionID, testConversationID)
+	}
+	if record.Phase != taskPhaseCompleted {
+		t.Fatalf("journal Phase = %q, want %q", record.Phase, taskPhaseCompleted)
+	}
+	if record.DeliveryReceipt == "" || !isValidDeliveryReceipt(record.DeliveryReceipt) {
+		t.Fatalf("expected valid delivery receipt in journal, got: %q", record.DeliveryReceipt)
+	}
+
+	// Verify recoverTask succeeds using the journal and matches the answer and receipt
+	app.activeTask = nil
+	recOut, err := app.recoverTask(context.Background())
+	if err != nil {
+		t.Fatalf("recoverTask failed: %v", err)
+	}
+	if recOut.Answer != "Completed first task after recovery." {
+		t.Fatalf("recoverTask Answer = %q, want %q", recOut.Answer, "Completed first task after recovery.")
+	}
+	if recOut.Receipt != record.DeliveryReceipt {
+		t.Fatalf("recoverTask Receipt = %q, want journal receipt %q", recOut.Receipt, record.DeliveryReceipt)
+	}
+
+	// Verify acknowledgeTask clears the journal
+	if err := app.acknowledgeTask(context.Background(), recOut.Receipt); err != nil {
+		t.Fatalf("acknowledgeTask failed: %v", err)
+	}
+	if _, exists, _ := app.loadTaskJournal(developer); exists {
+		t.Fatal("journal should be deleted after acknowledgeTask")
+	}
+
 	runner.assertDone()
 }

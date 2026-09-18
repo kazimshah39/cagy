@@ -178,9 +178,6 @@ func (a *App) monitorDeveloperTask(
 					return developerTaskResult{}, transcriptErr
 				}
 				if state.Found {
-					if quota.DetectedResponse(state.Response, task) {
-						return developerTaskResult{agent: current, output: state.Response, quotaExhausted: true}, nil
-					}
 					return developerTaskResult{agent: current, output: state.Response}, nil
 				}
 				if state.BackgroundPending {

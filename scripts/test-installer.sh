@@ -55,6 +55,7 @@ ARCHIVE_NAME="cagy_${VERSION}_${OS}_${ARCH}.tar.gz"
 SRC_STAGE="${TEST_TMP}/src_stage/cagy-main"
 mkdir -p "${SRC_STAGE}/cmd/cagy" "${SRC_STAGE}/internal"
 cp -r "${REPO_ROOT}/go.mod" "${SRC_STAGE}/"
+[ -f "${REPO_ROOT}/go.sum" ] && cp -r "${REPO_ROOT}/go.sum" "${SRC_STAGE}/"
 cp -r "${REPO_ROOT}/cmd" "${SRC_STAGE}/"
 cp -r "${REPO_ROOT}/internal" "${SRC_STAGE}/"
 tar -czf "${SERVER_DIR}/archive.tar.gz" -C "${TEST_TMP}/src_stage" cagy-main

@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,7 +23,7 @@ import (
 var errTaskAttention = errors.New("interrupted task needs attention")
 
 const (
-	taskJournalVersion  = 1
+	taskJournalVersion  = 2
 	maxTaskJournalBytes = 64 << 10
 	maxTaskLockBytes    = 4 << 10
 	staleLockGrace      = 30 * time.Second
@@ -52,6 +54,7 @@ type taskJournal struct {
 	FullOffset          int64     `json:"full_offset"`
 	TaskHash            string    `json:"task_sha256"`
 	Phase               taskPhase `json:"phase"`
+	DeliveryReceipt     string    `json:"delivery_receipt,omitempty"`
 	StartedAt           time.Time `json:"started_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }
@@ -66,9 +69,11 @@ const (
 )
 
 type taskInspection struct {
-	kind     taskInspectionKind
-	response string
-	message  string
+	kind             taskInspectionKind
+	response         string
+	receipt          string
+	message          string
+	developerRunning bool
 }
 
 func defaultStateDir() string {
@@ -301,6 +306,13 @@ func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, 
 		StartedAt:           now,
 		UpdatedAt:           now,
 	}
+	if phase == taskPhaseCompleted && record.DeliveryReceipt == "" {
+		receipt, err := randomDeliveryReceipt()
+		if err != nil {
+			return err
+		}
+		record.DeliveryReceipt = receipt
+	}
 	if sessionID, err := exactAgySessionID(developer); err == nil {
 		record.SessionID = sessionID
 	}
@@ -327,14 +339,46 @@ func (a *App) replaceTrackedPrompt(developer herdr.AgentInfo, task string, check
 	return a.writeTaskJournal(*a.activeTask)
 }
 
+func randomDeliveryReceipt() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("create delivery receipt: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+func isValidDeliveryReceipt(receipt string) bool {
+	if len(receipt) != 32 {
+		return false
+	}
+	for i := 0; i < len(receipt); i++ {
+		c := receipt[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error {
 	if a.activeTask == nil {
 		return nil
 	}
 	a.activeTask.Phase = phase
+	if phase == taskPhaseCompleted && a.activeTask.DeliveryReceipt == "" {
+		receipt, err := randomDeliveryReceipt()
+		if err != nil {
+			return err
+		}
+		a.activeTask.DeliveryReceipt = receipt
+	}
 	if developer.PaneID != "" {
 		a.activeTask.DeveloperPaneID = developer.PaneID
 	}
+	// Only update SessionID when the incoming developer has a valid session.
+	// This preserves a resumed session identity already written by
+	// replaceTrackedPrompt during quota recovery, which may be more recent
+	// than the developer value captured before recovery began.
 	if sessionID, err := exactAgySessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
@@ -348,7 +392,7 @@ func (a *App) warnTrackedPhase(phase taskPhase, developer herdr.AgentInfo) {
 }
 
 func validateTaskJournal(record taskJournal, info runtimeContext) error {
-	if record.Version != taskJournalVersion {
+	if record.Version != 1 && record.Version != 2 {
 		return fmt.Errorf("unsupported interrupted-task state version %d", record.Version)
 	}
 	if record.WorkspaceID != info.workspaceID || record.SupervisorPaneID != info.supervisor || record.Developer != info.developer {
@@ -377,6 +421,9 @@ func validateTaskJournal(record taskJournal, info runtimeContext) error {
 	}
 	if _, err := hex.DecodeString(record.TaskHash); err != nil {
 		return fmt.Errorf("interrupted-task state has an invalid task hash")
+	}
+	if record.DeliveryReceipt != "" && !isValidDeliveryReceipt(record.DeliveryReceipt) {
+		return fmt.Errorf("interrupted-task state has an invalid delivery receipt")
 	}
 	switch record.Phase {
 	case taskPhaseSubmitting, taskPhaseMonitoring, taskPhaseRecovering, taskPhaseBlocked, taskPhaseCompleted, taskPhaseUncertain:
@@ -414,6 +461,44 @@ func (a *App) journalCheckpoint(record taskJournal, sessionID string) (transcrip
 	}, nil
 }
 
+func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
+	receipt := record.DeliveryReceipt
+	needsWrite := false
+
+	if receipt == "" || !isValidDeliveryReceipt(receipt) {
+		newReceipt, err := randomDeliveryReceipt()
+		if err != nil {
+			return "", err
+		}
+		receipt = newReceipt
+		record.DeliveryReceipt = receipt
+		needsWrite = true
+	}
+
+	if record.Version < taskJournalVersion {
+		record.Version = taskJournalVersion
+		needsWrite = true
+	}
+	if record.Phase != taskPhaseCompleted {
+		record.Phase = taskPhaseCompleted
+		needsWrite = true
+	}
+
+	if needsWrite {
+		if err := a.writeTaskJournal(*record); err != nil {
+			return "", fmt.Errorf("save delivery receipt for completed task: %w", err)
+		}
+	}
+	return receipt, nil
+}
+
+// inspectTaskJournal is side-effect-free: it reads state and returns an
+// inspection result without writing to disk. If the record already has a
+// persisted delivery receipt it is included unchanged. If the record is in
+// taskPhaseCompleted but has no receipt, the receipt field of the returned
+// taskInspection is empty. Callers in the locked delivery paths must call
+// ensureCompletedReceipt to generate and persist a receipt before delivering.
+// Legacy v1→v2 receipt migration also happens only in that persisting path.
 func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, record taskJournal) (taskInspection, error) {
 	if err := validateTaskJournal(record, info); err != nil {
 		return taskInspection{}, err
@@ -463,14 +548,20 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 		}
 	}
 
+	// Return the already-persisted delivery receipt without modification.
+	// The locked delivery paths (recoverInterruptedTask, recoverTask) call
+	// ensureCompletedReceipt to generate and persist a receipt before
+	// delivering. Legacy v1→v2 migration also happens there.
+	existingReceipt := record.DeliveryReceipt
+
 	if developerErr != nil {
 		if responseState.Found && record.Phase == taskPhaseCompleted {
-			return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, message: "task completed, but the previous caller may not have received the final answer"}, nil
+			return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
 		}
 		return taskInspection{kind: taskInspectionUncertain, message: "developer is no longer running; inspect the saved task state before forgetting it"}, nil
 	}
 	if responseState.Found && record.Phase == taskPhaseCompleted {
-		return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, message: "task completed, but the previous caller may not have received the final answer"}, nil
+		return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
 	}
 	if developer.AgentStatus == "blocked" {
 		return taskInspection{kind: taskInspectionBlocked, message: "developer is blocked; check the right pane"}, nil
@@ -481,14 +572,12 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 		return taskInspection{}, fmt.Errorf("read interrupted-task developer state: %w", visibleErr)
 	}
 	visibleState := agyVisibleState(visible)
-	if visibleState == "working" || responseState.BackgroundPending || responseState.AwaitingResponse {
-		return taskInspection{kind: taskInspectionRunning, message: "task is still running in the visible developer pane"}, nil
+	devRunning := visibleState == "working" || developer.AgentStatus == "working"
+	if devRunning || responseState.BackgroundPending || responseState.AwaitingResponse {
+		return taskInspection{kind: taskInspectionRunning, developerRunning: devRunning, message: "task is still running in the visible developer pane"}, nil
 	}
 	if responseState.Found && visibleState == "idle" {
-		return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, message: "task completed, but the previous caller may not have received the final answer"}, nil
-	}
-	if developer.AgentStatus == "working" {
-		return taskInspection{kind: taskInspectionRunning, message: "task is still running in the visible developer pane"}, nil
+		return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
 	}
 	if record.Phase == taskPhaseBlocked {
 		return taskInspection{kind: taskInspectionBlocked, message: "task was blocked; check the right pane"}, nil
@@ -572,16 +661,54 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 	if inspection.kind != taskInspectionCompleted {
 		return fmt.Errorf("interrupted task is not safely recoverable yet: %s", inspection.message)
 	}
+	// Persist the delivery receipt (and v1→v2 migration) before attempting
+	// stdout write. If write fails, the caller can retry --recover with the
+	// already-persisted receipt intact.
+	receipt, err := a.ensureCompletedReceipt(&record)
+	if err != nil {
+		return fmt.Errorf("save delivery receipt before output: %w", err)
+	}
 	if _, err := fmt.Fprintln(a.stdout, inspection.response); err != nil {
 		return fmt.Errorf("write recovered agy response; retry cagy ask --recover: %w", err)
 	}
-	if err := a.removeTaskJournal(info.developer); err != nil {
+	// Reload so acknowledgeLockedTask sees the persisted receipt on disk.
+	updatedRecord, exists, loadErr := a.loadTaskJournal(info.developer)
+	if loadErr != nil {
+		return fmt.Errorf("agy answer was recovered, but durable task state could not be reloaded: %w; run cagy doctor", loadErr)
+	}
+	if !exists {
+		return fmt.Errorf("agy answer was recovered, but durable task state disappeared before acknowledgment; run cagy doctor")
+	}
+	if err := a.acknowledgeLockedTask(updatedRecord, receipt, info); err != nil {
 		return fmt.Errorf("agy answer was recovered, but durable task state could not be cleared; run cagy doctor: %w", err)
 	}
 	return nil
 }
 
-func (a *App) forgetInterruptedTask(ctx context.Context) error {
+func (a *App) acknowledgeLockedTask(record taskJournal, receipt string, info runtimeContext) error {
+	if err := validateTaskJournal(record, info); err != nil {
+		return err
+	}
+	if record.Phase != taskPhaseCompleted {
+		return fmt.Errorf("task is not completed (current phase: %s)", record.Phase)
+	}
+	if subtle.ConstantTimeCompare([]byte(record.DeliveryReceipt), []byte(receipt)) != 1 {
+		return fmt.Errorf("invalid delivery receipt: receipt does not match the active completed task")
+	}
+	if err := a.removeTaskJournal(info.developer); err != nil {
+		return fmt.Errorf("clear completed task state: %w", err)
+	}
+	if a.activeTask != nil && a.activeTask.Developer == info.developer {
+		a.activeTask = nil
+	}
+	return nil
+}
+
+func (a *App) acknowledgeTask(ctx context.Context, receipt string) error {
+	receipt = strings.TrimSpace(receipt)
+	if !isValidDeliveryReceipt(receipt) {
+		return fmt.Errorf("invalid delivery receipt: must be 32 lowercase hexadecimal characters")
+	}
 	info, err := a.context()
 	if err != nil {
 		return err
@@ -591,43 +718,201 @@ func (a *App) forgetInterruptedTask(ctx context.Context) error {
 		return err
 	}
 	defer lock.release()
+
+	record, exists, err := a.loadTaskJournal(info.developer)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("no unacknowledged task exists")
+	}
+	return a.acknowledgeLockedTask(record, receipt, info)
+}
+
+func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
+	info, err := a.context()
+	if err != nil {
+		return nil, err
+	}
+	record, exists, loadErr := a.loadTaskJournal(info.developer)
+	if loadErr != nil {
+		fmt.Fprintf(a.stderr, "cagy warning: task journal is unreadable: %v\n", loadErr)
+		return &TaskStatusOutput{
+			Status:  "uncertain",
+			Message: "task journal is unreadable; run cagy doctor",
+		}, nil
+	}
+	if !exists {
+		developer, err := a.herdr.GetAgent(ctx, info.developer)
+		if err != nil {
+			if herdr.IsCode(err, "agent_not_found") {
+				return &TaskStatusOutput{
+					Status:  "none",
+					Message: "no active task; developer is not running",
+				}, nil
+			}
+			return nil, fmt.Errorf("check developer status: %w", err)
+		}
+		return &TaskStatusOutput{
+			Status:  "none",
+			Message: fmt.Sprintf("no active task; developer is %s", developer.AgentStatus),
+		}, nil
+	}
+
+	inspection, err := a.inspectTaskJournal(ctx, info, record)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "cagy warning: task state is invalid: %v\n", err)
+		return &TaskStatusOutput{
+			Status:  "uncertain",
+			Message: "task state is invalid; run cagy doctor",
+		}, nil
+	}
+
+	elapsed := ""
+	if !record.StartedAt.IsZero() {
+		elapsed = a.now().Sub(record.StartedAt).Round(time.Second).String()
+	}
+
+	switch inspection.kind {
+	case taskInspectionCompleted:
+		return &TaskStatusOutput{
+			Status:                  "completed_unacknowledged",
+			Message:                 inspection.message,
+			Elapsed:                 elapsed,
+			Recoverable:             true,
+			AcknowledgementRequired: true,
+		}, nil
+	case taskInspectionRunning:
+		status := "running"
+		if record.Phase == taskPhaseSubmitting {
+			status = "submitting"
+		} else if record.Phase == taskPhaseRecovering {
+			status = "recovering"
+		}
+		return &TaskStatusOutput{
+			Status:  status,
+			Message: inspection.message,
+			Elapsed: elapsed,
+		}, nil
+	case taskInspectionBlocked:
+		return &TaskStatusOutput{
+			Status:  "blocked",
+			Message: inspection.message,
+			Elapsed: elapsed,
+		}, nil
+	default:
+		return &TaskStatusOutput{
+			Status:  "uncertain",
+			Message: inspection.message,
+			Elapsed: elapsed,
+		}, nil
+	}
+}
+
+func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
+	info, err := a.context()
+	if err != nil {
+		return nil, err
+	}
+	lock, err := acquireLock(a.stateDir, info.developer, a.now())
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
+
+	record, exists, err := a.loadTaskJournal(info.developer)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("there is no interrupted task to recover")
+	}
+	inspection, err := a.inspectTaskJournal(ctx, info, record)
+	if err != nil {
+		return nil, err
+	}
+	if inspection.kind != taskInspectionCompleted {
+		return nil, fmt.Errorf("interrupted task is not safely recoverable yet: %s", inspection.message)
+	}
+	// Persist receipt (and v1→v2 migration) before returning it to the caller.
+	receipt, err := a.ensureCompletedReceipt(&record)
+	if err != nil {
+		return nil, fmt.Errorf("save delivery receipt before recovery: %w", err)
+	}
+	return &RecoverTaskOutput{
+		Status:                  "completed_unacknowledged",
+		Answer:                  inspection.response,
+		Receipt:                 receipt,
+		AcknowledgementRequired: true,
+	}, nil
+}
+
+func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, error) {
+	if !confirm {
+		return nil, fmt.Errorf("forgetting task state requires explicit confirm=true")
+	}
+	info, err := a.context()
+	if err != nil {
+		return nil, err
+	}
+	lock, err := acquireLock(a.stateDir, info.developer, a.now())
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
+
 	record, exists, loadErr := a.loadTaskJournal(info.developer)
 	if loadErr != nil {
 		if !exists {
-			return loadErr
+			return nil, loadErr
 		}
 		running, checkErr := a.interruptedTaskStillRunning(ctx, info)
 		if checkErr != nil {
-			return fmt.Errorf("cannot safely forget unreadable interrupted-task state: %w", checkErr)
+			return nil, fmt.Errorf("cannot safely forget unreadable interrupted-task state: %w", checkErr)
 		}
 		if running {
-			return fmt.Errorf("refusing to forget unreadable task state while the developer is still running")
+			return nil, fmt.Errorf("refusing to forget unreadable task state while the developer is still running")
 		}
 		if removeErr := a.removeTaskJournal(info.developer); removeErr != nil {
-			return fmt.Errorf("discard unreadable interrupted-task state: %w", removeErr)
+			return nil, fmt.Errorf("discard unreadable interrupted-task state: %w", removeErr)
 		}
-		fmt.Fprintln(a.stdout, "forgot unreadable interrupted-task state; no task was submitted")
-		return nil
+		if a.activeTask != nil && a.activeTask.Developer == info.developer {
+			a.activeTask = nil
+		}
+		return &ForgetTaskOutput{Status: "forgotten", Message: "forgot unreadable interrupted-task state"}, nil
 	}
 	if !exists {
-		return fmt.Errorf("there is no interrupted task state to forget")
+		return nil, fmt.Errorf("there is no interrupted task state to forget")
 	}
 	inspection, inspectErr := a.inspectTaskJournal(ctx, info, record)
 	if inspectErr != nil {
 		running, checkErr := a.interruptedTaskStillRunning(ctx, info)
 		if checkErr != nil {
-			return fmt.Errorf("cannot safely forget invalid interrupted-task state: %w", checkErr)
+			return nil, fmt.Errorf("cannot safely forget invalid interrupted-task state: %w", checkErr)
 		}
 		if running {
-			return fmt.Errorf("refusing to forget invalid task state while the developer is still running")
+			return nil, fmt.Errorf("refusing to forget invalid task state while the developer is still running")
 		}
 	} else if inspection.kind == taskInspectionRunning {
-		return fmt.Errorf("refusing to forget a task that is still running")
+		if inspection.developerRunning {
+			return nil, fmt.Errorf("refusing to forget a task that is still running")
+		}
 	}
 	if err := a.removeTaskJournal(info.developer); err != nil {
+		return nil, err
+	}
+	if a.activeTask != nil && a.activeTask.Developer == info.developer {
+		a.activeTask = nil
+	}
+	return &ForgetTaskOutput{Status: "forgotten", Message: "forgot interrupted-task state"}, nil
+}
+
+func (a *App) forgetInterruptedTask(ctx context.Context) error {
+	out, err := a.forgetTask(ctx, true)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintln(a.stdout, "forgot interrupted-task state; no task was submitted")
+	fmt.Fprintln(a.stdout, out.Message+"; no task was submitted")
 	return nil
 }
 

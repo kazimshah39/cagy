@@ -13,7 +13,7 @@ Do not turn this into a general multi-agent framework.
 ## Non-Negotiable Rules
 
 - Use Herdr only. Never add tmux.
-- Do not add a cagy server, daemon, hidden worker, queue, web UI, or serverless mode.
+- Do not add a persistent server daemon, network listener, hidden worker, queue, web UI, or general multi-agent framework. Only the local stdio MCP child process (`cagy mcp-server`) launched by Codex is permitted.
 - Support only Codex and agy.
 - Always launch Codex with `--yolo --dangerously-bypass-hook-trust`, a per-invocation trusted-project override, and supervisor text through the `developer_instructions` config override. Never send supervisor instructions as an initial user task.
 - Always launch agy with `--dangerously-skip-permissions --mode accept-edits`.
@@ -21,7 +21,7 @@ Do not turn this into a general multi-agent framework.
 - Do not add a safe-mode switch that removes these required flags.
 - `agm` is an unchanged external CLI dependency. Never fork, patch, vendor, import, or read its database.
 - Keep AGM recovery visible in the developer pane.
-- Public commands stay small: `cagy`, `cagy doctor`, and `cagy stop`. `cagy ask` is the supervisor's delegation command.
+- Public commands stay small: `cagy`, `cagy doctor`, and `cagy stop`. `cagy ask` is the supervisor's emergency/compatibility fallback command.
 
 ## Source of Truth
 
@@ -61,7 +61,12 @@ Read `project-structure.md` before architecture changes and update it when a dec
 ## Supervisor Workflow
 
 - The user talks to Codex.
-- Codex delegates implementation using `cagy ask --stdin` with a single-quoted heredoc so backticks, dollar signs, quotes, and other shell syntax remain literal.
+- Codex delegates implementation using native cagy MCP tools (`delegate_task`, `task_status`, `acknowledge_task`, `recover_task`). Tasks arrive literally without shell interpolation.
+- Completed task output requires explicit receipt acknowledgment via `acknowledge_task`.
+- agy is not a native Codex subagent; Codex interacts with agy through the local stdio MCP bridge.
+- No global Codex configuration or plugin is installed (`~/.codex/config.toml` is untouched).
+- Already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge.
+- Shell CLI commands (`cagy ask --stdin`, `--recover`, `--forget`) remain available strictly as emergency and manual compatibility fallbacks.
 - Codex should not edit the same files while agy is working.
 - After agy finishes, Codex reviews the changes and relevant tests before reporting completion.
 

@@ -63,6 +63,76 @@ func TestDetectedResponseHandlesWrappedTask(t *testing.T) {
 	}
 }
 
+func TestDetectedResponseIgnoresModelReasoningAndDiscussion(t *testing.T) {
+	task := "Write rate limit handler"
+	cases := []string{
+		`Thinking Process:
+1. The user asks for rate limit error handling.
+2. When the API returns 429 rate limit exceeded or quota exhausted, the client should back off.
+3. Writing the response now.
+
+Here is the implementation:
+The client catches rate limit exceeded and retries up to 3 times.`,
+		`<thinking>
+Checking if the error code is RESOURCE_EXHAUSTED.
+If it is HTTP 429 rate limit exceeded, we should retry.
+</thinking>
+Here is the code:
+func handle(err error) {
+    if err == codes.ResourceExhausted {
+        log.Println("rate limit exceeded, retrying")
+    }
+}`,
+		`I have added the error handling code:
+` + "```go" + `
+if resp.StatusCode == 429 {
+    // quota exceeded handling
+    time.Sleep(backoff)
+}
+` + "```",
+	}
+	for i, c := range cases {
+		if DetectedResponse(c, task) {
+			t.Errorf("case %d: model reasoning or code discussing rate limits was falsely treated as quota error: %s", i, c)
+		}
+	}
+}
+
+func TestDetectedResponseIgnoresEchoedTaskInBox(t *testing.T) {
+	task := "Fix the bug where the server crashes with RESOURCE_EXHAUSTED: quota exceeded"
+	output := `╭─ Prompt ────────────────────────────────────────────────────────────╮
+│ Fix the bug where the server crashes with RESOURCE_EXHAUSTED:       │
+│ quota exceeded                                                      │
+╰─────────────────────────────────────────────────────────────────────╯
+I have inspected the bug and fixed the crash.`
+	if DetectedResponse(output, task) {
+		t.Fatal("echoed task in prompt box was falsely treated as quota error")
+	}
+}
+
+func TestDetectedResponseDetectsRealProviderError(t *testing.T) {
+	task := "Implement feature"
+	cases := []string{
+		"> Implement feature\n\nAPI Error: 429 RESOURCE_EXHAUSTED: quota exceeded for model gemini-3.8-flash",
+		"> Implement feature\n\nError: You have exceeded your current quota. Please check your plan.",
+		"> Implement feature\n\nHTTP 429: project quota unavailable",
+		"> Implement feature\n\nError: rate limit exceeded",
+		"> Implement feature\n\nrate limit error from API status 429",
+		"> Implement feature\n\nrpc error: code = ResourceExhausted desc = Quota exceeded for quota metric 'Queries' and limit 'Queries per minute'",
+		"> Implement feature\n\nFATAL: usage limit reached for account test@example.com",
+		"> Implement feature\n\n429 Too Many Requests",
+		"> Implement feature\n\nHTTP 429: Too Many Requests",
+		"> Implement feature\n\n429: quota exhausted",
+		"> Implement feature\n\ngoogle.api_core.exceptions.ResourceExhausted: 429 Quota exceeded for metric",
+		"> Implement feature\n\nexceptions.ResourceExhausted: rate limit reached",
+	}
+	for _, c := range cases {
+		if !DetectedResponse(c, task) {
+			t.Errorf("expected quota detection for real provider error: %s", c)
+		}
+	}
+}
+
 func TestNewOutput(t *testing.T) {
 	t.Parallel()
 	if got := NewOutput("old\n", "old\nnew\n"); got != "new" {
@@ -137,5 +207,97 @@ func TestNewOutputIgnoresRepeatedAgyFooter(t *testing.T) {
 	want := "> Create second.txt\n\n  I have created second.txt.\n\n  No other files were changed."
 	if got != want {
 		t.Fatalf("NewOutput() = %q, want %q", got, want)
+	}
+}
+
+func TestDetectedResponseRejectsProseAndCodeDiscussingQuotaMatcher(t *testing.T) {
+	task := "Implement a quota detector and matcher"
+	cases := []struct {
+		name   string
+		output string
+	}{
+		{
+			name: "prose mentioning resource exhausted and 429",
+			output: `> Implement a quota detector and matcher
+
+I have implemented the detector function. It checks for RESOURCE_EXHAUSTED and HTTP 429 status codes without false positives. All unit tests are passing now.`,
+		},
+		{
+			name: "prose with error keyword in descriptive context",
+			output: `> Implement a quota detector and matcher
+
+The previous code had an issue where discussing a rate limit error or 429 response triggered false recovery. I fixed the regular expressions.`,
+		},
+		{
+			name: "prose mentioning HTTP 429 Too Many Requests outside code blocks",
+			output: `> Implement a quota detector and matcher
+
+I implemented handling for HTTP 429: Too Many Requests in the client retry loop.`,
+		},
+		{
+			name: "prose mentioning code = ResourceExhausted outside code blocks",
+			output: `> Implement a quota detector and matcher
+
+The parser recognizes code = ResourceExhausted when parsing status objects.`,
+		},
+		{
+			name: "prose mentioning exceptions.ResourceExhausted outside code blocks",
+			output: `> Implement a quota detector and matcher
+
+In the API wrapper, we catch exceptions.ResourceExhausted and log a warning.`,
+		},
+		{
+			name:   "fenced markdown code block with error strings",
+			output: "> Implement a quota detector and matcher\n\nHere is the implementation:\n```go\nfunc isQuotaError(err error) bool {\n\tif strings.Contains(err.Error(), \"RESOURCE_EXHAUSTED\") || strings.Contains(err.Error(), \"429\") {\n\t\treturn true\n\t}\n\treturn false\n}\n```\nAll tests pass.",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if DetectedResponse(tc.output, task) {
+				t.Fatalf("unexpected quota error detection for: %s", tc.output)
+			}
+		})
+	}
+}
+
+func TestDetectedResponseDetectsErrorWhenTaskContainsErrorPhrase(t *testing.T) {
+	task := "Investigate RESOURCE_EXHAUSTED and HTTP 429 failures in the backend service"
+	cases := []struct {
+		name   string
+		output string
+	}{
+		{
+			name: "task contains error phrase followed by real provider error banner",
+			output: `> Investigate RESOURCE_EXHAUSTED and HTTP 429 failures in the backend service
+
+API Error: 429 RESOURCE_EXHAUSTED: quota exceeded for model gemini-3.8-flash`,
+		},
+		{
+			name:   "task contains error phrase followed by standalone resource exhausted line",
+			output: "> Investigate RESOURCE_EXHAUSTED and HTTP 429 failures in the backend service\n\nRESOURCE_EXHAUSTED",
+		},
+		{
+			name: "task contains error phrase followed by rpc error line",
+			output: `> Investigate RESOURCE_EXHAUSTED and HTTP 429 failures in the backend service
+
+rpc error: code = ResourceExhausted desc = RESOURCE_EXHAUSTED: quota exceeded`,
+		},
+		{
+			name: "task contains error phrase followed by 429 quota line",
+			output: `> Investigate RESOURCE_EXHAUSTED and HTTP 429 failures in the backend service
+
+429: quota exhausted`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if !DetectedResponse(tc.output, task) {
+				t.Fatalf("expected quota error detection for: %s", tc.output)
+			}
+		})
 	}
 }

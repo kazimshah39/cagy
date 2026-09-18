@@ -6,14 +6,38 @@ import (
 )
 
 var strongPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bRESOURCE[_ ]EXHAUSTED\b`),
-	regexp.MustCompile(`(?i)\bquota\s+(?:has\s+been\s+)?(?:exceeded|exhausted|depleted)\b`),
-	regexp.MustCompile(`(?i)\bout\s+of\s+(?:quota|credits?)\b`),
-	regexp.MustCompile(`(?i)\busage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)\b`),
-	regexp.MustCompile(`(?i)\brate\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)\b`),
-	regexp.MustCompile(`(?is)\b429\b.{0,240}\b(?:quota|rate\s+limit)\b`),
-	regexp.MustCompile(`(?is)\b(?:quota|rate\s+limit)\b.{0,240}\b429\b`),
+	// 1. gRPC / API status codes and standalone error lines
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?RESOURCE[_ ]EXHAUSTED(?:\s*[:\-].*)?$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:rpc\s+error|error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-]\s*(?:.*?\b)?RESOURCE[_ ]EXHAUSTED\b`),
+	regexp.MustCompile(`(?i)\bcode\s*[:=]\s*ResourceExhausted\b`),
+	regexp.MustCompile(`(?i)\bexceptions?\.(?:ResourceExhausted|RESOURCE_EXHAUSTED)\b`),
+
+	// 2. Explicit HTTP 429 status lines or API errors
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:(?:api|provider|runtime|rpc)\s+error|error|fatal|exception|failed)\s*[:\-]?\s*(?:.*?\b)?(?:HTTP\s*)?429\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:HTTP\s+)?429\s*[:\-]\s*(?:quota|rate\s*limit|project\s*quota|too\s*many|RESOURCE[_ ]EXHAUSTED).*\s*$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:HTTP\s+)?429\s+(?:Too Many Requests|RESOURCE_EXHAUSTED)\b`),
+	regexp.MustCompile(`(?i)\bHTTP\s+429\s*[:\-]\s*`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?rate\s+limit\s+error\b.*?\b429\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:api|provider|runtime)\s+error\s*[:\-]?\s*(?:.*?\b)?429\b`),
+
+	// 3. Provider error banners and runtime error prefixes
+	regexp.MustCompile(`(?i)(?:^|\n|[\.!\?]\s*|\b)(?:error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-]\s*(?:.*?\b)?(?:quota\s+(?:has\s+been\s+)?(?:exceeded|exhausted|depleted)|out\s+of\s+(?:quota|credits?)|usage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)|rate\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded))\b`),
+
+	// 4. Direct user account / quota exhaustion notifications from the provider
+	regexp.MustCompile(`(?i)\b(?:you\s+have\s+exceeded\s+your\s+(?:current\s+)?quota|you\s+are\s+out\s+of\s+quota|account\s+has\s+exceeded\s+its\s+usage\s+limit|insufficient\s+quota\s+for\s+model|exceeded\s+your\s+current\s+quota)\b`),
+
+	// 5. Standalone error lines (line that is purely a quota error announcement)
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:quota\s+(?:has\s+been\s+)?(?:exceeded|exhausted|depleted)|out\s+of\s+(?:quota|credits?)|usage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)|rate\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded))\s*(?:for\s+this\s+model)?\s*[\.\!]?\s*$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?429\s*[:\-]\s*(?:quota|rate\s*limit).*\s*$`),
 }
+
+var (
+	thoughtBlockPattern    = regexp.MustCompile(`(?is)<\s*thinking\s*>.*?<\s*/\s*thinking\s*>`)
+	thinkingLinePattern    = regexp.MustCompile(`(?im)^\s*(?:Thinking Process|Thought|Thinking)\s*:.*$`)
+	fencedCodeBlockPattern = regexp.MustCompile("(?s)```.*?```")
+	promptBoxPattern       = regexp.MustCompile(`(?is)\s*╭[─━\s]*Prompt.*?\n╰[─━\s]*╯\s*`)
+	userRequestPattern     = regexp.MustCompile(`(?is)\s*<USER_REQUEST>.*?</USER_REQUEST>\s*`)
+)
 
 // Detected returns true only for strong quota/rate-limit error evidence.
 func Detected(text string) bool {
@@ -25,17 +49,97 @@ func Detected(text string) bool {
 	return false
 }
 
-// DetectedResponse checks agent output without treating the echoed task as an
-// error. agy shows the submitted prompt in its transcript, and that prompt may
-// legitimately contain quota-error examples.
-func DetectedResponse(output, task string) bool {
-	normalizedOutput := strings.Join(strings.Fields(output), " ")
-	normalizedTask := strings.Join(strings.Fields(task), " ")
-	normalizedOutput = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(normalizedOutput), ">"))
-	if normalizedTask != "" && strings.HasPrefix(normalizedOutput, normalizedTask) {
-		normalizedOutput = strings.TrimSpace(strings.TrimPrefix(normalizedOutput, normalizedTask))
+// cleanEchoedTask removes only the echoed task prompt at the turn boundary,
+// leaving subsequent provider error messages intact even if they contain the
+// same error phrases as the prompt.
+func cleanEchoedTask(output, task string) string {
+	cleaned := output
+
+	// 1. Remove prompt box at the boundary if present near the start
+	if loc := promptBoxPattern.FindStringIndex(cleaned); loc != nil && loc[0] <= 100 {
+		return cleaned[:loc[0]] + "\n" + cleaned[loc[1]:]
 	}
-	return Detected(normalizedOutput)
+
+	// 2. Remove <USER_REQUEST> block if present near the start
+	if loc := userRequestPattern.FindStringIndex(cleaned); loc != nil && loc[0] <= 100 {
+		return cleaned[:loc[0]] + "\n" + cleaned[loc[1]:]
+	}
+
+	words := strings.Fields(task)
+	if len(words) == 0 {
+		return cleaned
+	}
+
+	// 3. Build regex matching the task words joined by arbitrary whitespace, indents, or borders
+	var pattern strings.Builder
+	for i, w := range words {
+		if i > 0 {
+			pattern.WriteString(`[\s│|║┃╭╮╰╯─━]+`)
+		}
+		pattern.WriteString(regexp.QuoteMeta(w))
+	}
+
+	// Match prompt starting with '>' near the beginning of output
+	if promptRe, err := regexp.Compile(`(?i)(?:^|\n)\s*>\s*` + pattern.String()); err == nil {
+		if loc := promptRe.FindStringIndex(cleaned); loc != nil && loc[0] <= 100 {
+			return cleaned[:loc[0]] + "\n" + cleaned[loc[1]:]
+		}
+	}
+
+	// Match prompt words near the beginning of output
+	if taskRe, err := regexp.Compile(`(?i)(?:^|\n)\s*` + pattern.String()); err == nil {
+		if loc := taskRe.FindStringIndex(cleaned); loc != nil && loc[0] <= 100 {
+			return cleaned[:loc[0]] + "\n" + cleaned[loc[1]:]
+		}
+	}
+
+	return cleaned
+}
+
+func cleanModelReasoning(output string) string {
+	result := thoughtBlockPattern.ReplaceAllString(output, "")
+	result = thinkingLinePattern.ReplaceAllString(result, "")
+	result = fencedCodeBlockPattern.ReplaceAllString(result, "")
+	return result
+}
+
+var responsePatterns = []*regexp.Regexp{
+	// 1. Standalone or error-prefixed gRPC / API status code lines
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?RESOURCE[_ ]EXHAUSTED(?:\s*[:\-].*)?$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:rpc\s+error|error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-]\s*(?:.*?\b)?RESOURCE[_ ]EXHAUSTED\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:(?:rpc\s+error|error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-].*?\b)?code\s*[:=]\s*ResourceExhausted\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:(?:(?:Traceback|raise|fatal|error|api\s+error|provider\s+error|runtime\s+error|exception)\b.*?\b)?[a-zA-Z0-9_\.]*exceptions?\.(?:ResourceExhausted|RESOURCE_EXHAUSTED)\s*[:\-].*|[a-zA-Z0-9_\.]*exceptions?\.(?:ResourceExhausted|RESOURCE_EXHAUSTED)\s*$)`),
+
+	// 2. Explicit HTTP 429 status lines or API errors
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:(?:api|provider|runtime|rpc)\s+error|error|fatal|exception|failed)\s*[:\-]?\s*(?:.*?\b)?(?:HTTP\s*)?429\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:HTTP\s+)?429\s*[:\-]\s*(?:quota|rate\s*limit|project\s*quota|too\s*many|RESOURCE[_ ]EXHAUSTED).*\s*$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:HTTP\s+)?429\s+(?:Too Many Requests|RESOURCE_EXHAUSTED)\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?HTTP\s+429\s*[:\-]\s*.*$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?rate\s+limit\s+error\b.*?\b429\b`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:api|provider|runtime)\s+error\s*[:\-]?\s*(?:.*?\b)?429\b`),
+
+	// 3. Provider error banners and runtime error prefixes
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-]\s*(?:.*?\b)?(?:quota\s+(?:has\s+been\s+)?(?:exceeded|exhausted|depleted)|out\s+of\s+(?:quota|credits?)|usage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)|rate\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded))\b`),
+
+	// 4. Direct user account / quota exhaustion notifications from the provider
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:(?:error|api\s+error|provider\s+error|runtime\s+error|fatal|exception)\s*[:\-]\s*)?(?:you\s+have\s+exceeded\s+your\s+(?:current\s+)?quota|you\s+are\s+out\s+of\s+quota|account\s+has\s+exceeded\s+its\s+usage\s+limit|insufficient\s+quota\s+for\s+model|exceeded\s+your\s+current\s+quota)\b`),
+
+	// 5. Standalone error lines (line that is purely a quota error announcement)
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?(?:quota\s+(?:has\s+been\s+)?(?:exceeded|exhausted|depleted)|out\s+of\s+(?:quota|credits?)|usage\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded)|rate\s+limit\s+(?:has\s+been\s+)?(?:reached|exceeded))\s*(?:for\s+this\s+model)?\s*[\.\!]?\s*$`),
+	regexp.MustCompile(`(?im)^\s*(?:>\s*)?429\s*[:\-]\s*(?:quota|rate\s*limit).*\s*$`),
+}
+
+// DetectedResponse checks agent output without treating the echoed task,
+// model reasoning, code blocks, or successful descriptive prose as an error.
+func DetectedResponse(output, task string) bool {
+	cleaned := cleanEchoedTask(output, task)
+	cleaned = cleanModelReasoning(cleaned)
+	for _, pattern := range responsePatterns {
+		if pattern.MatchString(cleaned) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewOutput extracts text added after a prior terminal snapshot.

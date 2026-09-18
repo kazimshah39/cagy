@@ -54,10 +54,13 @@ Runtime speed is mostly controlled by Codex, agy, Herdr, and AGM, so Rust would 
 cagy [DIRECTORY]                     # Start with one Codex-based cagy sidebar row
 cagy --show-agents [DIRECTORY]       # Show both supervisor and developer rows
 cagy doctor                          # Check Herdr context and required CLIs
-cagy stop              # Close the verified developer pane
-cagy ask --stdin        # Internal safe delegation; task is read from stdin
-cagy ask --recover      # Recover one exact completed answer after caller loss
-cagy ask --forget       # Explicitly discard stale state after pane inspection
+cagy stop                            # Close the verified developer pane
+cagy mcp-server                      # Internal: local stdio MCP server for Codex (not for direct use)
+
+# Compatibility/emergency CLI commands (Codex uses native MCP tools in normal operation)
+cagy ask --stdin                     # Read task from stdin and delegate to agy
+cagy ask --recover                   # Recover one exact completed answer after caller loss
+cagy ask --forget                    # Explicitly discard stale state after pane inspection
 ```
 
 The user runs `cagy` from an interactive shell pane inside Herdr.
@@ -96,7 +99,7 @@ Executables on `PATH`:
 
 Build dependency:
 
-- Go 1.22 or newer
+- Go 1.25 or newer (required for source builds; the official MCP Go SDK v1.8.0 requires Go 1.25)
 
 `agm` is used only through its public command line. cagy never imports AGM code, reads its database, or handles its credentials.
 
@@ -158,7 +161,11 @@ Normal completion is ordered deliberately:
 
 After caller loss, `cagy doctor` reconciles the journal without mutating panes. `cagy ask --recover` hashes transcript user events after the saved offsets and returns only the exact matching final planner response. `cagy ask --forget` is the explicit escape hatch for corrupt or unrecoverable state and refuses while the developer is visibly working. New work is never sent while unresolved state exists.
 
-The supervisor passes tasks through `cagy ask --stdin`. This avoids shell evaluation of backticks, `$()` expressions, dollar variables, quotes, and other task content, and avoids exposing the task in the cagy process argument list.
+The normal supervisor path uses the native cagy MCP tools (`delegate_task`, `task_status`, `recover_task`, `acknowledge_task`). Tasks arrive through structured JSON inputs, never through shell command strings. Shell CLI commands (`cagy ask --stdin`, `--recover`, `--forget`) remain available for emergency, scripting, and manual compatibility use.
+
+Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge.
+
+A delivery receipt is returned by `delegate_task` and `recover_task`. Codex must call `acknowledge_task` with the matching receipt to clear completed state. The journal persists as `completed_unacknowledged` until the receipt is acknowledged, so a restarted session can recover the exact answer without resubmitting the task.
 
 ## Quota Detection
 
@@ -241,7 +248,10 @@ cagy/
     ├── app/
     │   ├── app.go
     │   ├── commands.go
+    │   ├── mcp.go            # local stdio MCP server and six native tools
+    │   ├── mcp_config.go     # safe per-invocation Codex MCP configuration
     │   ├── recovery.go
+    │   ├── task_state.go
     │   └── *_test.go
     ├── herdr/
     │   ├── client.go
@@ -260,7 +270,8 @@ cagy/
 
 ## Safety Boundaries
 
-- Project paths are subprocess arguments. Supervisor task text is read from stdin and never interpolated into shell text or persisted as plaintext.
+- Project paths and prompts are subprocess argument arrays, never shell strings. Supervisor task text arrives through MCP structured inputs without shell interpolation, is kept out of Codex launch arguments and persistent task state (journal stores only a SHA-256 hash), and is passed directly as a positional argument array element to `herdr agent prompt`.
+- The `cagy mcp-server` child process communicates with Codex only through inherited stdin/stdout. It opens no socket, port, or external connection.
 - Shell text used in recovery contains only fixed AGM commands and random hexadecimal completion markers. Waits require a numeric marker status and cannot match the echoed command's `%s` format.
 - Pane IDs always come from Herdr JSON.
 - cagy closes only the developer pane it can verify in the current workspace and project.
@@ -273,9 +284,13 @@ cagy/
 
 ```bash
 gofmt -w cmd internal
+go mod tidy
+go mod verify
 go test ./...
+go test -race ./...
 go vet ./...
 go build ./cmd/cagy
+make verify
 ```
 
 Automated tests use fakes only. With explicit user approval, visible end-to-end tests verified fresh-project trust handling, first-task delivery, quota-triggered AGM refresh and switching, resumed work, and the one-hour refresh skip.

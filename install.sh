@@ -105,7 +105,7 @@ case "$ARCH_RAW" in
     ;;
 esac
 
-# Helper: check Go version (must be >= 1.22)
+# Helper: check Go version (must be >= 1.25)
 check_go() {
   if ! command -v go >/dev/null 2>&1; then
     return 1
@@ -114,7 +114,7 @@ check_go() {
   MAJOR="$(echo "$GO_VER_STR" | cut -d. -f1)"
   MINOR="$(echo "$GO_VER_STR" | cut -d. -f2)"
   if [ -n "$MAJOR" ] && [ -n "$MINOR" ]; then
-    if [ "$MAJOR" -gt 1 ] || { [ "$MAJOR" -eq 1 ] && [ "$MINOR" -ge 22 ]; }; then
+    if [ "$MAJOR" -gt 1 ] || { [ "$MAJOR" -eq 1 ] && [ "$MINOR" -ge 25 ]; }; then
       return 0
     fi
   fi
@@ -243,12 +243,12 @@ install_from_source() {
 
   if [ "$go_status" -eq 1 ]; then
     echo "Error: Go toolchain not found on PATH." >&2
-    echo "cagy source installation requires Go 1.22 or newer." >&2
+    echo "cagy source installation requires Go 1.25 or newer." >&2
     echo "Install Go from https://go.dev/dl/ or use prebuilt release binaries if published." >&2
     exit 1
   elif [ "$go_status" -eq 2 ]; then
-    echo "Error: Go version is older than 1.22 ($(go version))." >&2
-    echo "cagy requires Go 1.22 or newer to compile." >&2
+    echo "Error: Go version is older than 1.25 ($(go version))." >&2
+    echo "cagy requires Go 1.25 or newer to compile." >&2
     exit 1
   fi
 

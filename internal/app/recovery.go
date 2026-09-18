@@ -15,25 +15,25 @@ import (
 
 const agmConfirmation = "Switch to this account? [y/N]:"
 
-func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.AgentInfo, originalTask string, taskStarted bool) (string, error) {
+func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.AgentInfo, originalTask string, taskStarted bool) (string, herdr.AgentInfo, error) {
 	currentDeveloper := developer
 	var lastErr error
 	for attempt := 1; attempt <= maxRecoveryAttempts; attempt++ {
 		identity, err := a.developerRecoveryIdentity(ctx, info, currentDeveloper, !taskStarted)
 		if err != nil {
-			return "", err
+			return "", herdr.AgentInfo{}, err
 		}
 		currentDeveloper = identity.agent
 		if identity.pending {
 			if err := a.recordFreshDeveloperSessionState(ctx, currentDeveloper); err != nil {
-				return "", fmt.Errorf("save fresh agy state before quota recovery: %w", err)
+				return "", herdr.AgentInfo{}, fmt.Errorf("save fresh agy state before quota recovery: %w", err)
 			}
 		} else if err := a.persistDeveloperSession(ctx, currentDeveloper.PaneID, currentDeveloper); err != nil {
-			return "", fmt.Errorf("save agy conversation before quota recovery: %w", err)
+			return "", herdr.AgentInfo{}, fmt.Errorf("save agy conversation before quota recovery: %w", err)
 		}
 		supervisor, err := a.supervisorPane(ctx, info)
 		if err != nil {
-			return "", err
+			return "", herdr.AgentInfo{}, err
 		}
 		pane, err := a.herdr.SplitRight(ctx, info.project)
 		if err != nil {
@@ -42,11 +42,11 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		}
 		if err := validatePaneScope(pane, info, supervisor); err != nil {
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return "", fmt.Errorf("recovery pane is unsafe: %w", err)
+			return "", herdr.AgentInfo{}, fmt.Errorf("recovery pane is unsafe: %w", err)
 		}
 		if err := a.markRecoveryPane(ctx, info, pane.PaneID); err != nil {
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return "", err
+			return "", herdr.AgentInfo{}, err
 		}
 
 		if _, _, err := a.maybeRefreshAll(ctx, pane.PaneID); err != nil {
@@ -82,7 +82,7 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		// Account selection is complete. Remove the owned temporary pane before
 		// stopping agy so a restart failure leaves exactly one repair candidate.
 		if err := a.confirmClosePane(ctx, pane.PaneID); err != nil {
-			return "", fmt.Errorf("close successful recovery pane before restart: %w; original developer was kept", err)
+			return "", herdr.AgentInfo{}, fmt.Errorf("close successful recovery pane before restart: %w; original developer was kept", err)
 		}
 		var resumed herdr.AgentInfo
 		if identity.pending {
@@ -91,12 +91,12 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 			resumed, err = a.restartDeveloperInPlace(ctx, info, currentDeveloper)
 		}
 		if err != nil {
-			return "", fmt.Errorf("quota account switched but developer restart failed: %w", err)
+			return "", herdr.AgentInfo{}, fmt.Errorf("quota account switched but developer restart failed: %w", err)
 		}
 
 		checkpoint, checkpointErr := a.transcriptCheckpoint(resumed)
 		if checkpointErr != nil {
-			return "", fmt.Errorf("prepare resumed agy transcript: %w", checkpointErr)
+			return "", herdr.AgentInfo{}, fmt.Errorf("prepare resumed agy transcript: %w", checkpointErr)
 		}
 		before, _ := a.herdr.ReadAgent(ctx, info.developer, 400)
 		prompt := originalTask
@@ -104,7 +104,7 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 			prompt = continuationPrompt(originalTask)
 		}
 		if err := a.replaceTrackedPrompt(resumed, prompt, checkpoint, taskPhaseSubmitting); err != nil {
-			return "", fmt.Errorf("save resumed task state before submission: %w", err)
+			return "", herdr.AgentInfo{}, fmt.Errorf("save resumed task state before submission: %w", err)
 		}
 		result, taskErr := a.runDeveloperTask(ctx, info.developer, prompt, before, checkpoint)
 		taskStarted = true
@@ -118,22 +118,26 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 			continue
 		}
 		if taskErr != nil {
-			return "", fmt.Errorf("resumed agy task failed: %w", taskErr)
+			return "", herdr.AgentInfo{}, fmt.Errorf("resumed agy task failed: %w", taskErr)
 		}
 		a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 		if result.agent.AgentStatus == "blocked" {
-			return "", fmt.Errorf("resumed developer is blocked; check the right pane")
+			return "", herdr.AgentInfo{}, fmt.Errorf("resumed developer is blocked; check the right pane")
 		}
 		if result.output == "" {
-			return "", fmt.Errorf("resumed agy finished without readable output")
+			return "", herdr.AgentInfo{}, fmt.Errorf("resumed agy finished without readable output")
 		}
-		return result.output, nil
+		finalDeveloper := resumed
+		if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
+			finalDeveloper = result.agent
+		}
+		return result.output, finalDeveloper, nil
 	}
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no usable AGM account was found")
 	}
-	return "", fmt.Errorf("quota recovery failed after %d attempts: %w; original developer was kept", maxRecoveryAttempts, lastErr)
+	return "", herdr.AgentInfo{}, fmt.Errorf("quota recovery failed after %d attempts: %w; original developer was kept", maxRecoveryAttempts, lastErr)
 }
 
 func (a *App) confirmClosePane(ctx context.Context, paneID string) error {

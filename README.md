@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/kazimshah39/cagy/main/install.sh | 
 ```
 
 The installer:
-- uses your local Go toolchain (Go 1.22+) to build a clean binary;
+- uses your local Go toolchain (Go 1.25+) to build a clean binary;
 - installs to `~/.local/bin` without requiring `sudo` or root permissions;
 - also supports downloading prebuilt release binaries (`--binary`) with SHA-256 checksum verification if published.
 
@@ -127,7 +127,7 @@ rm -f "$HOME/.local/bin/cagy"
 - Codex CLI
 - agy CLI
 - [agm](https://github.com/shyim/agm)
-- Go 1.22+ (used for source compilation and building)
+- Go 1.25+ (required for source compilation and building; prebuilt binaries are self-contained)
 
 AGM stays an unchanged external dependency. cagy also needs Herdr's official agy integration so complete answers can be read from agy's transcript:
 
@@ -184,7 +184,22 @@ cagy --show-agents /path/to/project
 
 The compact/expanded choice uses Herdr's transient Agent-view API. Herdr supports one active Agent view per server, so compact mode becomes the active view while leaving every non-cagy agent visible. Expanded mode clears the view only when cagy still owns it; it does not remove a view installed later by another tool.
 
-Talk to Codex in the left pane. Codex sends work to agy through stdin so task text is not interpreted by the shell or exposed in the process argument list:
+Talk to Codex in the left pane. Codex delegates implementation to agy through the native cagy MCP bridge — a required local stdio server that Codex initializes automatically. Codex uses structured MCP tools instead of shell commands, eliminating supervisor shell interpolation and keeping task text out of Codex supervisor launch arguments and durable journals. When cagy delegates to the developer, prompt text is passed directly as a positional argument array element to `herdr agent prompt`:
+
+- **`delegate_task`** — send a task to agy; returns the final answer and a delivery receipt.
+- **`task_status`** — inspect the current status of any delegated task (read-only).
+- **`recover_task`** — retrieve the exact completed answer after an interruption without resubmitting (persists or migrates the delivery receipt safely).
+- **`acknowledge_task`** — confirm receipt; clears durable task state only after the answer is in Codex's context.
+- **`forget_task`** — explicitly discard unrecoverable state (requires confirmation; refused while agy is working).
+- **`developer_status`** — inspect agy's pane, session readiness, and task summary (read-only).
+
+The MCP bridge is a Codex-managed local stdio child process. It is not a daemon, network listener, or native Codex subagent. No global Codex configuration or plugin installation is required.
+
+> **Note:** Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge.
+
+### Compatibility and Emergency Fallback
+
+`cagy ask --stdin` is preserved strictly as a compatibility and emergency fallback command for manual scripting or situations where the supervisor needs a direct CLI escape hatch:
 
 ```bash
 cat <<'CAGY_TASK' | cagy ask --stdin
@@ -192,7 +207,7 @@ Implement the requested change safely.
 CAGY_TASK
 ```
 
-Direct `cagy ask "<task>"` remains available for short manually typed tasks, but the supervisor always uses `--stdin`.
+Direct `cagy ask "<task>"` also remains available as a manual fallback for short tasks.
 
 Other commands:
 

@@ -3,11 +3,10 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/kazimshah39/cagy/internal/herdr"
 )
@@ -167,6 +166,12 @@ func (a *App) doctor(ctx context.Context) error {
 	check("current Herdr pane", a.checkCurrentPane(ctx))
 	if a.getenv("CAGY_SUPERVISOR_PANE_ID") != "" && a.getenv("CAGY_PROJECT_DIR") != "" {
 		check("cagy session", a.checkSessionHealth(ctx))
+		if taskErr := a.reportTaskJournal(ctx); taskErr != nil {
+			failed = true
+			if !errors.Is(taskErr, errTaskAttention) {
+				fmt.Fprintf(a.stdout, "✗ interrupted task state: %v\n", taskErr)
+			}
+		}
 	}
 
 	if failed {
@@ -181,11 +186,15 @@ func (a *App) ask(ctx context.Context, task string) error {
 	if err != nil {
 		return err
 	}
-	lock, err := acquireLock(a.tempDir, contextInfo.developer)
+	lock, err := acquireLock(a.stateDir, contextInfo.developer, a.now())
 	if err != nil {
 		return err
 	}
 	defer lock.release()
+
+	if err := a.ensureNoInterruptedTask(ctx, contextInfo); err != nil {
+		return err
+	}
 
 	developer, err := a.ensureDeveloper(ctx, contextInfo)
 	if err != nil {
@@ -201,19 +210,29 @@ func (a *App) ask(ctx context.Context, task string) error {
 		return fmt.Errorf("developer is not ready (%s); check the right pane", developer.AgentStatus)
 	}
 
-	if exhausted, probeErr := a.agyQuotaExhausted(ctx); probeErr == nil && exhausted {
-		recoveredOutput, err := a.recover(ctx, contextInfo, developer, task, false)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(a.stdout, strings.TrimSpace(recoveredOutput))
-		return nil
-	}
-
+	exhausted, _ := a.agyQuotaExhausted(ctx)
 	checkpoint, err := a.transcriptCheckpoint(developer)
 	if err != nil {
 		return fmt.Errorf("prepare agy transcript: %w", err)
 	}
+	phase := taskPhaseSubmitting
+	if exhausted {
+		phase = taskPhaseRecovering
+	}
+	if err := a.beginTaskTracking(contextInfo, developer, task, checkpoint, phase); err != nil {
+		return fmt.Errorf("prepare durable task state: %w", err)
+	}
+
+	if exhausted {
+		fmt.Fprintln(a.stderr, "cagy: agy quota is low; starting visible account recovery before task submission")
+		recoveredOutput, recoverErr := a.recover(ctx, contextInfo, developer, task, false)
+		if recoverErr != nil {
+			a.warnTrackedPhase(taskPhaseUncertain, developer)
+			return recoverErr
+		}
+		return a.deliverTrackedOutput(strings.TrimSpace(recoveredOutput), developer)
+	}
+
 	before, _ := a.herdr.ReadAgent(ctx, contextInfo.developer, 400)
 	result, taskErr := a.runDeveloperTask(ctx, contextInfo.developer, task, before, checkpoint)
 	if result.quotaExhausted {
@@ -221,27 +240,51 @@ func (a *App) ask(ctx context.Context, task string) error {
 		if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
 			recoveryDeveloper = result.agent
 		}
-		recoveredOutput, err := a.recover(ctx, contextInfo, recoveryDeveloper, task, true)
-		if err != nil {
-			return err
+		a.warnTrackedPhase(taskPhaseRecovering, recoveryDeveloper)
+		fmt.Fprintln(a.stderr, "cagy: agy quota was exhausted; starting visible account recovery")
+		recoveredOutput, recoverErr := a.recover(ctx, contextInfo, recoveryDeveloper, task, true)
+		if recoverErr != nil {
+			a.warnTrackedPhase(taskPhaseUncertain, recoveryDeveloper)
+			return recoverErr
 		}
-		fmt.Fprintln(a.stdout, strings.TrimSpace(recoveredOutput))
-		return nil
+		return a.deliverTrackedOutput(strings.TrimSpace(recoveredOutput), result.agent)
 	}
 	if taskErr != nil {
-		return fmt.Errorf("agy task failed: %w", taskErr)
+		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
+		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
+			return fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run cagy doctor: %w", taskErr)
+		}
+		return fmt.Errorf("agy task failed; run cagy doctor before sending another task: %w", taskErr)
 	}
 	a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 	if result.agent.AgentStatus == "blocked" {
-		if result.output != "" {
-			fmt.Fprintln(a.stdout, result.output)
-		}
+		a.warnTrackedPhase(taskPhaseBlocked, result.agent)
 		return fmt.Errorf("developer is blocked; check the right pane")
 	}
 	if result.output == "" {
+		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
+		return fmt.Errorf("agy finished without readable output; run cagy doctor")
+	}
+	return a.deliverTrackedOutput(result.output, result.agent)
+}
+
+func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo) error {
+	if strings.TrimSpace(output) == "" {
+		a.warnTrackedPhase(taskPhaseUncertain, developer)
 		return fmt.Errorf("agy finished without readable output")
 	}
-	fmt.Fprintln(a.stdout, result.output)
+	if err := a.setTrackedPhase(taskPhaseCompleted, developer); err != nil {
+		return fmt.Errorf("save completed task state before delivering output: %w", err)
+	}
+	if _, err := fmt.Fprintln(a.stdout, output); err != nil {
+		return fmt.Errorf("write agy response; recover it with cagy ask --recover: %w", err)
+	}
+	if a.activeTask != nil {
+		if err := a.removeTaskJournal(a.activeTask.Developer); err != nil {
+			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run cagy doctor before new work: %w", err)
+		}
+	}
+	a.activeTask = nil
 	return nil
 }
 
@@ -486,29 +529,4 @@ func mergeEnv(base []string, values map[string]string) []string {
 		result = append(result, key+"="+value)
 	}
 	return result
-}
-
-type taskLock struct {
-	path string
-	file *os.File
-}
-
-func acquireLock(tempDir, developer string) (*taskLock, error) {
-	sum := sha256.Sum256([]byte(developer))
-	path := filepath.Join(tempDir, fmt.Sprintf("cagy-%x.lock", sum[:8]))
-	// #nosec G304 -- path is under the configured temp directory with a SHA-256 filename.
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if os.IsExist(err) {
-		return nil, fmt.Errorf("developer is busy; if no task is running, remove %s", path)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("create task lock: %w", err)
-	}
-	_, _ = fmt.Fprintf(file, "pid=%d\nstarted=%s\n", os.Getpid(), time.Now().Format(time.RFC3339))
-	return &taskLock{path: path, file: file}, nil
-}
-
-func (l *taskLock) release() {
-	_ = l.file.Close()
-	_ = os.Remove(l.path)
 }

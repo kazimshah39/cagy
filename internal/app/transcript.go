@@ -34,9 +34,14 @@ func transcriptRef(session *herdr.AgentSessionInfo) *transcript.Ref {
 }
 
 func (a *App) completedTranscriptResponse(checkpoint transcript.Checkpoint, agent herdr.AgentInfo, task string) (string, bool, error) {
+	state, err := a.completedTranscriptState(checkpoint, agent, task)
+	return state.Response, state.Found, err
+}
+
+func (a *App) completedTranscriptState(checkpoint transcript.Checkpoint, agent herdr.AgentInfo, task string) (transcript.ResponseState, error) {
 	ref := transcriptRef(agent.AgentSession)
 	if ref == nil {
-		return "", false, fmt.Errorf("agy transcript was not reported; run: herdr integration install antigravity-cli")
+		return transcript.ResponseState{}, fmt.Errorf("agy transcript was not reported; run: herdr integration install antigravity-cli")
 	}
-	return transcript.FinalResponseFor(a.agyBrainRoot, *ref, checkpoint, task)
+	return transcript.FinalResponseStateForHash(a.agyBrainRoot, *ref, checkpoint, transcript.TaskHash(task))
 }

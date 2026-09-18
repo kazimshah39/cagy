@@ -184,7 +184,15 @@ cagy --show-agents /path/to/project
 
 The compact/expanded choice uses Herdr's transient Agent-view API. Herdr supports one active Agent view per server, so compact mode becomes the active view while leaving every non-cagy agent visible. Expanded mode clears the view only when cagy still owns it; it does not remove a view installed later by another tool.
 
-Talk to Codex in the left pane. Codex sends work to agy with `cagy ask`.
+Talk to Codex in the left pane. Codex sends work to agy through stdin so task text is not interpreted by the shell or exposed in the process argument list:
+
+```bash
+cat <<'CAGY_TASK' | cagy ask --stdin
+Implement the requested change safely.
+CAGY_TASK
+```
+
+Direct `cagy ask "<task>"` remains available for short manually typed tasks, but the supervisor always uses `--stdin`.
 
 Other commands:
 
@@ -195,9 +203,27 @@ cagy stop
 
 Before each delegated task, cagy checks agy's real `/model` and `/quota` status. While a task is running, it checks again after each five-minute wait segment if agy appears stuck. The task is submitted only once. A transient Herdr `idle` or `done` state does not finish the task.
 
-Herdr's pane remains the visible status and progress view. cagy waits for agy's real footer to stay idle, treats `esc to cancel` and a non-zero `task(s)` count as still working, and watches separately for a blocked state. It then reads the exact task's final answer from agy's JSONL transcript instead of terminal scrollback. `transcript_full.jsonl` is preferred so long answers are not cut off; the compact transcript is used only when the full file does not exist. Intermediate progress messages, tool output, model reasoning, system messages, old turns, and blocked-screen scrollback are never returned as the answer. If the transcript integration is missing or the final record is incomplete, cagy stops with a clear error instead of silently returning a partial answer.
+Herdr's pane remains the visible status and progress view. cagy waits for agy's real footer to stay idle, treats `esc to cancel` and a non-zero `task(s)` count as still working, and watches separately for a blocked state. It also follows transcript background-task lifecycle events, so a temporary idle footer and an intermediate “still waiting” message cannot be mistaken for the final answer. It then reads the exact task's final answer from agy's JSONL transcript instead of terminal scrollback. `transcript_full.jsonl` is preferred so long answers are not cut off; the compact transcript is used only when the full file does not exist. Intermediate progress messages, tool output, model reasoning, system messages, old turns, and blocked-screen scrollback are never returned as the answer. If the transcript integration is missing or the final record is incomplete, cagy stops with a clear error instead of silently returning a partial answer.
 
 `cagy ask --help` and `cagy ask -h` show local help immediately; they are never sent to agy.
+
+Before one task is submitted, cagy atomically writes a bounded private `0600` journal inside a `0700` user state directory. Symlinks, non-regular files, oversized files, and unsafe permissions are rejected. The journal contains cagy/Herdr identity, timestamps, transcript offsets, and a SHA-256 task identifier. It never contains task text, credentials, model output, or reasoning. cagy prints an immediate submission message and a bounded heartbeat every five minutes to stderr; the final agy answer remains the only normal stdout payload.
+
+If the shell, terminal host, Codex tool runner, or `cagy ask` process disappears, agy can continue in the visible pane. The next `cagy doctor` reconciles the journal with the verified live developer and exact JSONL transcript. It reports whether the task is still running, blocked, completed without acknowledgment, or uncertain. cagy never resends that task automatically.
+
+Recover a completed answer after a lost caller with:
+
+```bash
+cagy ask --recover
+```
+
+After manually inspecting the visible developer pane, discard stale or unrecoverable state with:
+
+```bash
+cagy ask --forget
+```
+
+`--forget` refuses while the developer is still visibly working. A crashed caller's lock is reclaimed only after its recorded process is confirmed dead; a live lock remains exclusive.
 
 When the active model's weekly quota is 3% or less, or the 5-hour quota is 2% or less, cagy visibly runs:
 

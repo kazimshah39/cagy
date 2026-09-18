@@ -29,10 +29,13 @@ func TestAGMRefreshDueUsesOneHourWindow(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			application := New(&fakeRunner{}, &strings.Builder{}, &strings.Builder{})
-			application.tempDir = t.TempDir()
+			application.stateDir = t.TempDir()
 			application.now = func() time.Time { return now }
+			if err := ensurePrivateStateDir(application.stateDir); err != nil {
+				t.Fatal(err)
+			}
 			if !test.missing {
-				path := filepath.Join(application.tempDir, agmRefreshStateName)
+				path := filepath.Join(application.stateDir, agmRefreshStateName)
 				if err := os.WriteFile(path, []byte(test.state+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -53,7 +56,7 @@ func TestMaybeRefreshAllRecordsConfirmedPartialSuccess(t *testing.T) {
 		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("Completed: 2 successful, 1 failed\n" + marker + ":0\n")},
 	}}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	application.now = func() time.Time { return now }
 	application.token = func() (string, error) { return "token", nil }
 
@@ -90,14 +93,14 @@ func TestMaybeRefreshAllRejectsUnconfirmedRefresh(t *testing.T) {
 				{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult(test.output + "\n" + marker + ":" + strconv.Itoa(test.status) + "\n")},
 			}}
 			application := New(runner, &strings.Builder{}, &strings.Builder{})
-			application.tempDir = t.TempDir()
+			application.stateDir = t.TempDir()
 			application.token = func() (string, error) { return "token", nil }
 
 			attempted, _, err := application.maybeRefreshAll(context.Background(), "w1:p2")
 			if !attempted || err == nil {
 				t.Fatalf("attempted=%v err=%v", attempted, err)
 			}
-			if _, statErr := os.Stat(filepath.Join(application.tempDir, agmRefreshStateName)); !os.IsNotExist(statErr) {
+			if _, statErr := os.Stat(filepath.Join(application.stateDir, agmRefreshStateName)); !os.IsNotExist(statErr) {
 				t.Fatalf("failed refresh recorded state: %v", statErr)
 			}
 			runner.assertDone()
@@ -109,7 +112,7 @@ func TestMaybeRefreshAllSkipsRecentRefresh(t *testing.T) {
 	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
 	runner := &scriptedRunner{t: t}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	application.now = func() time.Time { return now }
 	if err := application.recordAGMRefresh(now.Add(-30 * time.Minute)); err != nil {
 		t.Fatal(err)

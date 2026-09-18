@@ -50,6 +50,15 @@ func TestCodexArgsAlwaysUseYoloSearchAndInvocationTrust(t *testing.T) {
 	}
 }
 
+func TestSupervisorPromptUsesSafeStdinDelegation(t *testing.T) {
+	if !strings.Contains(supervisorPrompt, "cat <<'CAGY_TASK' | cagy ask --stdin") {
+		t.Fatalf("supervisor prompt lacks safe stdin delegation: %q", supervisorPrompt)
+	}
+	if strings.Contains(supervisorPrompt, `cagy ask "<`) {
+		t.Fatalf("supervisor prompt recommends unsafe quoted argv delegation: %q", supervisorPrompt)
+	}
+}
+
 func TestParseStartArgsDefaultsCompactAndSupportsExpandedMode(t *testing.T) {
 	tests := []struct {
 		args     []string
@@ -108,12 +117,12 @@ func TestValidateDeveloperRejectsWrongWorkspaceAndProject(t *testing.T) {
 
 func TestTaskLockRejectsConcurrentOwner(t *testing.T) {
 	dir := t.TempDir()
-	first, err := acquireLock(dir, "developer")
+	first, err := acquireLock(dir, "developer", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.release()
-	if _, err := acquireLock(dir, "developer"); err == nil {
+	if _, err := acquireLock(dir, "developer", time.Now()); err == nil {
 		t.Fatal("expected busy lock error")
 	}
 }
@@ -206,6 +215,7 @@ func TestRecoveryPolicyIsFixed(t *testing.T) {
 type runStep struct {
 	want   []string
 	result proc.Result
+	err    error
 	before func()
 }
 
@@ -237,7 +247,7 @@ func (r *scriptedRunner) Run(_ context.Context, args ...string) (proc.Result, er
 	if step.before != nil {
 		step.before()
 	}
-	return step.result, nil
+	return step.result, step.err
 }
 
 func (r *scriptedRunner) RunAttached(args []string, env []string) error {
@@ -376,9 +386,9 @@ func TestAskReturnsOnlyNewDeveloperOutput(t *testing.T) {
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
 		sessionOwnershipStep("w1:p2", testConversationID),
 	}}
-	var stdout strings.Builder
-	application := New(runner, &stdout, os.Stderr)
-	application.tempDir = t.TempDir()
+	var stdout, stderr strings.Builder
+	application := New(runner, &stdout, &stderr)
+	application.stateDir = t.TempDir()
 	application.agyBrainRoot = brainRoot
 	application.transcriptWait = time.Second
 	application.getenv = envGetter(map[string]string{
@@ -389,12 +399,19 @@ func TestAskReturnsOnlyNewDeveloperOutput(t *testing.T) {
 		"CAGY_DEVELOPER":          developer,
 		"CAGY_PROJECT_DIR":        project,
 	})
-	if err := application.ask(context.Background(), task); err != nil {
+	application.stdin = strings.NewReader(task + "\n")
+	if err := application.Run(context.Background(), []string{"ask", "--stdin"}); err != nil {
 		t.Fatal(err)
 	}
 	runner.assertDone()
 	if got := stdout.String(); got != "Implemented.\n" {
 		t.Fatalf("stdout=%q", got)
+	}
+	if !strings.Contains(stderr.String(), "submitting one task") {
+		t.Fatalf("stderr lacks immediate lifecycle status: %q", stderr.String())
+	}
+	if _, err := os.Stat(application.taskJournalPath(developer)); !os.IsNotExist(err) {
+		t.Fatalf("delivered task journal still exists: %v", err)
 	}
 }
 
@@ -453,7 +470,7 @@ func TestAskRecoversQuotaWithVisibleAGMPartialIDESuccess(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: steps}
 	var stdout strings.Builder
 	application := New(runner, &stdout, os.Stderr)
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	application.agyBrainRoot = brainRoot
 	application.transcriptWait = time.Second
 	tokens := []string{"refresh1", "switch1"}
@@ -828,7 +845,7 @@ func TestRecoveryStopsAfterTwoAttemptsAndKeepsOriginalDeveloper(t *testing.T) {
 
 	runner := &scriptedRunner{t: t, steps: steps}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	tokens := []string{"refresh1", "switch1", "switch2"}
 	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
 	_, err := application.recover(context.Background(), info, agent, "task", true)
@@ -875,7 +892,7 @@ func TestAskPreflightQuotaRecoverySendsOriginalTask(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: steps}
 	var stdout strings.Builder
 	application := New(runner, &stdout, &strings.Builder{})
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	application.agyBrainRoot = brainRoot
 	application.transcriptWait = time.Second
 	application.now = func() time.Time { return time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC) }
@@ -915,7 +932,7 @@ func TestRecoveryRejectsUnhealthyOrUnreadableSwitchedAccountsWithoutStoppingDeve
 
 	runner := &scriptedRunner{t: t, steps: steps}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.tempDir = t.TempDir()
+	application.stateDir = t.TempDir()
 	application.now = func() time.Time { return time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC) }
 	if err := application.recordAGMRefresh(application.now().Add(-30 * time.Minute)); err != nil {
 		t.Fatal(err)
@@ -1708,7 +1725,7 @@ func TestAskWarnsButReturnsCompletedOutputWhenSessionMetadataFails(t *testing.T)
 	}}
 	var stdout, stderr strings.Builder
 	app := New(runner, &stdout, &stderr)
-	app.tempDir = t.TempDir()
+	app.stateDir = t.TempDir()
 	app.agyBrainRoot = brainRoot
 	app.transcriptWait = time.Second
 	app.getenv = cagyEnv(project, developer)
@@ -1869,7 +1886,7 @@ func TestAskPreflightQuotaRecoveryRestartsFreshUnreportedSession(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: steps}
 	var stdout strings.Builder
 	app := New(runner, &stdout, &strings.Builder{})
-	app.tempDir = t.TempDir()
+	app.stateDir = t.TempDir()
 	app.agyBrainRoot = brainRoot
 	app.transcriptWait = time.Second
 	app.now = func() time.Time { return time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC) }

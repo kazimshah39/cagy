@@ -55,7 +55,9 @@ cagy [DIRECTORY]                     # Start with one Codex-based cagy sidebar r
 cagy --show-agents [DIRECTORY]       # Show both supervisor and developer rows
 cagy doctor                          # Check Herdr context and required CLIs
 cagy stop              # Close the verified developer pane
-cagy ask "<task>"      # Internal command used by Codex to delegate
+cagy ask --stdin        # Internal safe delegation; task is read from stdin
+cagy ask --recover      # Recover one exact completed answer after caller loss
+cagy ask --forget       # Explicitly discard stale state after pane inspection
 ```
 
 The user runs `cagy` from an interactive shell pane inside Herdr.
@@ -121,26 +123,42 @@ If the same verified developer already exists, cagy reuses it instead of making 
 
 `cagy ask`:
 
-1. Acquires one per-developer lock. There is no queue.
-2. Resolves the named developer and validates its workspace and project.
-3. Checks agy's machine-readable `/model` and `/quota` status before submitting work. If the confirmed quota is low, recovery happens first. A failed or unknown probe does not cause a blind switch.
-4. Resolves Herdr's agy conversation ID and records separate byte offsets for `transcript.jsonl` and `transcript_full.jsonl` when the session already exists.
-5. Reads a baseline of recent developer output for visible status and quota-error checks.
-6. Sends the task once with `herdr agent prompt --wait` using a five-minute wait segment.
-7. Treats Herdr `idle` and `done` results as hints only because they can appear briefly while agy is still processing. Subsequent Herdr waits match only `blocked`.
-8. Reads the current visible screen only for lifecycle markers. `esc to cancel` or a non-zero `task(s)` footer count means working. `? for shortcuts` without either working signal means idle. Marker text in old response content is ignored.
-9. Requires the real idle footer to remain stable for the transcript flush grace period. A non-empty planner message seen while agy is working can be only a progress update, so it is not returned early.
-10. If a five-minute prompt wait times out, reads new terminal output and checks `/model` and `/quota` again. A five-second `agent_prompt_stalled` result does not consume a five-minute segment. The task is never resent.
-11. Stops waiting after the fixed 30-minute task budget.
-12. After stable completion, resolves the conversation reported by Herdr and reads only new JSONL events after the checkpoint. It matches the exact task's `USER_INPUT`, then returns the last non-empty `MODEL` + `PLANNER_RESPONSE` + `DONE` content.
-13. Uses `transcript_full.jsonl` whenever it exists because the compact `transcript.jsonl` can truncate long content. The compact file is only a fallback when the full file does not exist.
-14. Never prints model reasoning, tool events, system messages, old turns, the full transcript, or terminal scrollback from a blocked task. The terminal remains the visible progress/status view but is not the completed-answer transport.
-15. If the session or complete final transcript event is missing, returns a clear error instead of possibly truncated terminal text.
-16. Removes the echoed task before checking strong quota-error patterns, so task examples cannot trigger false recovery.
-17. If strong output evidence or a successful low-quota probe appears, starts visible recovery.
-18. Releases the lock.
+1. Acquires one per-developer private lock. Dead-owner locks are reclaimed; live locks remain exclusive. There is no queue.
+2. Refuses to submit new work when an unresolved task journal exists, preventing duplicate side effects after caller interruption.
+3. Resolves the named developer and validates its workspace and project.
+4. Checks agy's machine-readable `/model` and `/quota` status before submitting work. If the confirmed quota is low, recovery happens first. A failed or unknown probe does not cause a blind switch.
+5. Resolves Herdr's agy conversation ID and records separate byte offsets for `transcript.jsonl` and `transcript_full.jsonl` when the session already exists.
+6. Reads a baseline of recent developer output for visible status and quota-error checks.
+7. Sends the task once with `herdr agent prompt --wait` using a five-minute wait segment.
+8. Treats Herdr `idle` and `done` results as hints only because they can appear briefly while agy is still processing. Subsequent Herdr waits match only `blocked`.
+9. Reads the current visible screen only for lifecycle markers. `esc to cancel` or a non-zero `task(s)` footer count means working. `? for shortcuts` without either working signal means idle. Marker text in old response content is ignored.
+10. Requires the real idle footer to remain stable for the transcript flush grace period. A non-empty planner message seen while agy is working can be only a progress update, so it is not returned early. Transcript `GENERIC/RUNNING` background-task events also keep the task active even if the footer temporarily looks idle; cagy waits for that task's completion signal and a later non-empty planner response.
+11. If a five-minute prompt wait times out, reads new terminal output and checks `/model` and `/quota` again. A five-second `agent_prompt_stalled` result does not consume a five-minute segment. The task is never resent.
+12. Stops waiting after the fixed 30-minute task budget.
+13. After stable completion, resolves the conversation reported by Herdr and reads only new JSONL events after the checkpoint. It matches the exact task's `USER_INPUT`, then returns the last non-empty `MODEL` + `PLANNER_RESPONSE` + `DONE` content.
+14. Uses `transcript_full.jsonl` whenever it exists because the compact `transcript.jsonl` can truncate long content. The compact file is only a fallback when the full file does not exist.
+15. Never prints model reasoning, tool events, system messages, old turns, the full transcript, or terminal scrollback from a blocked task. The terminal remains the visible progress/status view but is not the completed-answer transport.
+16. If the session or complete final transcript event is missing, returns a clear error instead of possibly truncated terminal text.
+17. Removes the echoed task before checking strong quota-error patterns, so task examples cannot trigger false recovery.
+18. If strong output evidence or a successful low-quota probe appears, starts visible recovery.
+19. Releases the lock.
 
-Herdr still owns panes, identity, blocked detection, and the visible terminal. cagy combines its verified agent/session data with agy's footer and structured transcripts because no one signal is reliable enough by itself for turn completion.
+Herdr still owns panes, identity, blocked detection, and the visible terminal. cagy combines its verified agent/session data with agy's footer, structured transcript events, and background-task lifecycle because no one signal is reliable enough by itself for turn completion.
+
+### Interrupted caller recovery
+
+A foreground `cagy ask` process cannot prevent its external terminal host from terminating it. Before submission, cagy therefore atomically writes a private task journal in the OS user state directory. The record contains only validated cagy/Herdr identity, timestamps, transcript byte offsets, phase, and the SHA-256 hash of the exact task. It never persists task plaintext or model output. State files are bounded, regular-file-only, private (`0600` inside a `0700` directory), and atomically replaced.
+
+Normal completion is ordered deliberately:
+
+1. Verify the stable idle footer and exact final transcript event.
+2. Mark the journal `completed_unacknowledged`.
+3. Write the final answer to stdout and check the write result.
+4. Remove the journal only after stdout succeeds.
+
+After caller loss, `cagy doctor` reconciles the journal without mutating panes. `cagy ask --recover` hashes transcript user events after the saved offsets and returns only the exact matching final planner response. `cagy ask --forget` is the explicit escape hatch for corrupt or unrecoverable state and refuses while the developer is visibly working. New work is never sent while unresolved state exists.
+
+The supervisor passes tasks through `cagy ask --stdin`. This avoids shell evaluation of backticks, `$()` expressions, dollar variables, quotes, and other task content, and avoids exposing the task in the cagy process argument list.
 
 ## Quota Detection
 
@@ -201,7 +219,7 @@ Every supervisor/developer pair has a deterministic developer name and persisten
 
 ## Runtime Identity
 
-No database is needed. cagy derives a stable agent name from:
+No database is needed. cagy keeps only small private state files for lock recovery, the AGM refresh timestamp, and interrupted-task reconciliation. cagy derives a stable agent name from:
 
 - `HERDR_WORKSPACE_ID`
 - the supervisor `HERDR_PANE_ID`
@@ -242,7 +260,7 @@ cagy/
 
 ## Safety Boundaries
 
-- Project paths and prompts are subprocess arguments, never shell text.
+- Project paths are subprocess arguments. Supervisor task text is read from stdin and never interpolated into shell text or persisted as plaintext.
 - Shell text used in recovery contains only fixed AGM commands and random hexadecimal completion markers. Waits require a numeric marker status and cannot match the echoed command's `%s` format.
 - Pane IDs always come from Herdr JSON.
 - cagy closes only the developer pane it can verify in the current workspace and project.

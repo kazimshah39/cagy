@@ -29,43 +29,51 @@ const (
 )
 
 const supervisorPrompt = `You are the Codex supervisor. The visible agy agent in the right Herdr pane is the developer.
-Delegate implementation work by running: cagy ask "<clear development task>".
+Delegate implementation work safely through stdin so task text is never interpolated into a shell command. Use a single-quoted heredoc, for example:
+cat <<'CAGY_TASK' | cagy ask --stdin
+<clear development task>
+CAGY_TASK
 Do not edit the same files while agy is working. After agy finishes, inspect the changes, review correctness and security, and run relevant tests. Send corrections through another cagy ask when needed. Use current official web documentation for dependencies and external APIs. Give the final result to the user in clear, simple words.`
 
 // App owns command parsing and the fixed cagy workflow.
 type App struct {
-	runner           proc.Runner
-	herdr            *herdr.Client
-	stdout           io.Writer
-	stderr           io.Writer
-	getenv           func(string) string
-	environ          func() []string
-	tempDir          string
-	token            func() (string, error)
-	now              func() time.Time
-	agyBrainRoot     string
-	transcriptWait   time.Duration
-	developerPoll    time.Duration
-	agentStopTimeout time.Duration
-	configureSidebar func(context.Context, bool) error
+	runner                proc.Runner
+	herdr                 *herdr.Client
+	stdin                 io.Reader
+	stdout                io.Writer
+	stderr                io.Writer
+	getenv                func(string) string
+	environ               func() []string
+	stateDir              string
+	activeTask            *taskJournal
+	token                 func() (string, error)
+	now                   func() time.Time
+	agyBrainRoot          string
+	transcriptWait        time.Duration
+	missingTranscriptWait time.Duration
+	developerPoll         time.Duration
+	agentStopTimeout      time.Duration
+	configureSidebar      func(context.Context, bool) error
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 	herdrClient := herdr.New(runner)
 	application := &App{
-		runner:           runner,
-		herdr:            herdrClient,
-		stdout:           stdout,
-		stderr:           stderr,
-		getenv:           os.Getenv,
-		environ:          os.Environ,
-		tempDir:          os.TempDir(),
-		token:            randomToken,
-		now:              time.Now,
-		agyBrainRoot:     defaultAgyBrainRoot(),
-		transcriptWait:   3 * time.Second,
-		developerPoll:    time.Second,
-		agentStopTimeout: 10 * time.Second,
+		runner:                runner,
+		herdr:                 herdrClient,
+		stdin:                 os.Stdin,
+		stdout:                stdout,
+		stderr:                stderr,
+		getenv:                os.Getenv,
+		environ:               os.Environ,
+		stateDir:              defaultStateDir(),
+		token:                 randomToken,
+		now:                   time.Now,
+		agyBrainRoot:          defaultAgyBrainRoot(),
+		transcriptWait:        3 * time.Second,
+		missingTranscriptWait: 30 * time.Second,
+		developerPoll:         time.Second,
+		agentStopTimeout:      10 * time.Second,
 	}
 	application.configureSidebar = func(ctx context.Context, showAgents bool) error {
 		if showAgents {
@@ -91,12 +99,28 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		}
 		return a.doctor(ctx)
 	case "ask":
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			a.printAskHelp()
-			return nil
+		if len(args) == 2 {
+			switch args[1] {
+			case "-h", "--help":
+				a.printAskHelp()
+				return nil
+			case "--stdin":
+				task, err := readTaskInput(a.stdin)
+				if err != nil {
+					return err
+				}
+				return a.ask(ctx, task)
+			case "--recover":
+				return a.recoverInterruptedTask(ctx)
+			case "--forget":
+				return a.forgetInterruptedTask(ctx)
+			}
 		}
 		if len(args) < 2 || strings.TrimSpace(strings.Join(args[1:], " ")) == "" {
-			return fmt.Errorf("usage: cagy ask \"<development task>\"")
+			return fmt.Errorf("usage: cagy ask --stdin | cagy ask \"<development task>\" | cagy ask --recover | cagy ask --forget")
+		}
+		if strings.HasPrefix(args[1], "--") {
+			return fmt.Errorf("unknown cagy ask option: %s", args[1])
 		}
 		return a.ask(ctx, strings.Join(args[1:], " "))
 	case "stop":
@@ -142,14 +166,37 @@ Usage:
   cagy stop
 
 Internal supervisor command:
-  cagy ask "<development task>"`)
+  cagy ask --stdin`)
 }
 
 func (a *App) printAskHelp() {
 	fmt.Fprintln(a.stdout, `cagy ask - send one task to the visible agy developer
 
 Usage:
-  cagy ask "<development task>"`)
+  cagy ask --stdin
+  cagy ask "<development task>"
+  cagy ask --recover
+  cagy ask --forget`)
+}
+
+const maxTaskInputBytes = 1 << 20
+
+func readTaskInput(reader io.Reader) (string, error) {
+	if reader == nil {
+		return "", fmt.Errorf("cagy ask --stdin has no input stream")
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxTaskInputBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read task from stdin: %w", err)
+	}
+	if len(data) > maxTaskInputBytes {
+		return "", fmt.Errorf("task from stdin exceeds 1 MiB")
+	}
+	task := strings.TrimSpace(string(data))
+	if task == "" {
+		return "", fmt.Errorf("task from stdin is empty")
+	}
+	return task, nil
 }
 
 func resolveProject(path string) (string, error) {

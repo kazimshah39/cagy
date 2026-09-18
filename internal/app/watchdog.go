@@ -60,6 +60,7 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(developerPromptTimeoutMS)*time.Millisecond)
 	defer cancel()
 
+	fmt.Fprintln(a.stderr, "cagy: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
 	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, developerWaitSegmentMS)
 	after, readErr := a.herdr.ReadAgent(taskCtx, target, 400)
 	if readErr != nil {
@@ -78,8 +79,10 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 		return developerTaskResult{}, err
 	}
 	if current.AgentStatus == "blocked" {
+		a.warnTrackedPhase(taskPhaseBlocked, current)
 		return developerTaskResult{agent: current}, nil
 	}
+	a.warnTrackedPhase(taskPhaseMonitoring, current)
 
 	remaining := time.Duration(developerPromptTimeoutMS) * time.Millisecond
 	var lastProbeErr error
@@ -87,6 +90,7 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 		// A timeout consumed the first five-minute segment. The prompt was
 		// still submitted exactly once.
 		remaining -= time.Duration(developerWaitSegmentMS) * time.Millisecond
+		a.reportTaskProgress(current, time.Duration(developerPromptTimeoutMS)*time.Millisecond-remaining)
 		exhausted, probeErr := a.agyQuotaExhausted(taskCtx)
 		if probeErr != nil {
 			lastProbeErr = probeErr
@@ -119,8 +123,14 @@ func (a *App) monitorDeveloperTask(
 	if flushWait <= 0 {
 		flushWait = 3 * time.Second
 	}
+	missingWait := a.missingTranscriptWait
+	if missingWait <= 0 {
+		missingWait = 30 * time.Second
+	}
 
 	idleFor := time.Duration(0)
+	idleWithoutResponse := time.Duration(0)
+	sinceTranscriptCheck := time.Duration(0)
 	sinceProbe := time.Duration(0)
 	latestOutput := ""
 	for remaining > 0 {
@@ -132,6 +142,7 @@ func (a *App) monitorDeveloperTask(
 		if waitErr == nil {
 			current = blocked
 			if current.AgentStatus == "blocked" {
+				a.warnTrackedPhase(taskPhaseBlocked, current)
 				return developerTaskResult{agent: current}, nil
 			}
 		} else if !herdr.IsCode(waitErr, "timeout") {
@@ -151,30 +162,45 @@ func (a *App) monitorDeveloperTask(
 		switch agyVisibleState(visible) {
 		case "working":
 			idleFor = 0
+			idleWithoutResponse = 0
+			sinceTranscriptCheck = 0
 		case "idle":
 			idleFor += step
-			if idleFor >= flushWait {
+			sinceTranscriptCheck += step
+			if idleFor >= flushWait && sinceTranscriptCheck >= flushWait {
+				checkElapsed := sinceTranscriptCheck
+				sinceTranscriptCheck = 0
 				// A non-empty planner response can be a progress update while a
-				// tool is still running. Only accept it after the real footer has
-				// remained idle and no background task count is visible.
-				response, found, transcriptErr := a.completedTranscriptResponse(checkpoint, current, task)
+				// transcript-visible background task is still running. Require
+				// stable idle plus no pending background work before returning it.
+				state, transcriptErr := a.completedTranscriptState(checkpoint, current, task)
 				if transcriptErr != nil {
 					return developerTaskResult{}, transcriptErr
 				}
-				if found {
-					if quota.DetectedResponse(response, task) {
-						return developerTaskResult{agent: current, output: response, quotaExhausted: true}, nil
+				if state.Found {
+					if quota.DetectedResponse(state.Response, task) {
+						return developerTaskResult{agent: current, output: state.Response, quotaExhausted: true}, nil
 					}
-					return developerTaskResult{agent: current, output: response}, nil
+					return developerTaskResult{agent: current, output: state.Response}, nil
 				}
-				return developerTaskResult{}, fmt.Errorf("agy finished without a complete transcript response; check the right pane")
+				if state.BackgroundPending {
+					idleWithoutResponse = 0
+				} else {
+					idleWithoutResponse += checkElapsed
+					if idleWithoutResponse >= missingWait {
+						return developerTaskResult{}, fmt.Errorf("agy finished without a complete transcript response; check the right pane")
+					}
+				}
 			}
 		default:
 			// Unknown screen states are not proof of completion.
 			idleFor = 0
+			idleWithoutResponse = 0
+			sinceTranscriptCheck = 0
 		}
 
 		if sinceProbe >= time.Duration(developerWaitSegmentMS)*time.Millisecond {
+			a.reportTaskProgress(current, time.Duration(developerPromptTimeoutMS)*time.Millisecond-remaining)
 			recent, readErr := a.herdr.ReadAgent(ctx, target, 400)
 			if readErr != nil {
 				return developerTaskResult{}, fmt.Errorf("read agy response: %w", readErr)
@@ -200,6 +226,14 @@ func (a *App) monitorDeveloperTask(
 		return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes; quota check failed: %w", lastProbeErr)
 	}
 	return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes even though quota is available; check the right pane")
+}
+
+func (a *App) reportTaskProgress(agent herdr.AgentInfo, elapsed time.Duration) {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	a.warnTrackedPhase(taskPhaseMonitoring, agent)
+	fmt.Fprintf(a.stderr, "cagy: task is still running after %s; progress remains visible in the right pane\n", elapsed.Round(time.Second))
 }
 
 func (a *App) transcriptAgent(ctx context.Context, target string, agent herdr.AgentInfo) (herdr.AgentInfo, error) {

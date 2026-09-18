@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -44,9 +43,12 @@ func (a *App) maybeRefreshAll(ctx context.Context, paneID string) (bool, string,
 }
 
 func (a *App) agmRefreshDue() bool {
-	// #nosec G304 -- the filename is fixed and scoped to cagy's configured temp directory.
-	data, err := os.ReadFile(filepath.Join(a.tempDir, agmRefreshStateName))
-	if err != nil {
+	exists, err := inspectPrivateStateDir(a.stateDir)
+	if err != nil || !exists {
+		return true
+	}
+	data, exists, err := readPrivateStateFile(filepath.Join(a.stateDir, agmRefreshStateName), 256)
+	if err != nil || !exists {
 		return true
 	}
 	lastRefresh, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
@@ -57,8 +59,8 @@ func (a *App) agmRefreshDue() bool {
 }
 
 func (a *App) recordAGMRefresh(at time.Time) error {
-	path := filepath.Join(a.tempDir, agmRefreshStateName)
-	if err := os.WriteFile(path, []byte(at.UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+	data := []byte(at.UTC().Format(time.RFC3339Nano) + "\n")
+	if err := writePrivateStateFile(a.stateDir, agmRefreshStateName, data); err != nil {
 		return fmt.Errorf("save AGM refresh time: %w", err)
 	}
 	return nil

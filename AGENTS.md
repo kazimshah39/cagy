@@ -38,6 +38,9 @@ Read `project-structure.md` before architecture changes and update it when a dec
 - Require `HERDR_ENV=1` and validate workspace ownership before closing a pane.
 - Keep startup and recovery waits bounded. Treat a successful empty Herdr acknowledgment as success only for write commands that do not require response data.
 - Allow only one active `cagy ask` per developer.
+- Write a private atomic interrupted-task journal before submission. Store a task SHA-256 hash and transcript offsets, never task plaintext.
+- Never resend an unresolved task automatically. Recover an exact completed answer with `cagy ask --recover`; require explicit `cagy ask --forget` for unrecoverable state.
+- Emit immediate and five-minute lifecycle messages to stderr while keeping the final developer answer alone on stdout.
 - Keep errors short and actionable.
 
 ## Herdr Workflow
@@ -51,14 +54,14 @@ Read `project-structure.md` before architecture changes and update it when a dec
 - Use five-minute wait segments with a 30-minute task wait budget.
 - Let Herdr own normal `working`, `blocked`, `done`, `idle`, and `unknown` detection, but do not trust a spinner alone as proof that agy is still making progress.
 - Use the visible terminal only for lifecycle, progress, blocked-state, and quota-error checks. Read completed answers from agy's JSONL transcript using the pre-send byte offset and exact task event.
-- Return only the final non-empty `MODEL` + `PLANNER_RESPONSE` + `DONE` content. Never expose reasoning, tool events, system messages, or the full transcript.
+- Return only the final non-empty `MODEL` + `PLANNER_RESPONSE` + `DONE` content. Never expose reasoning, tool events, system messages, or the full transcript. A planner message is not final while the matching transcript still shows a background task as running; require its completion signal and a later non-empty planner response.
 - If a completed task has no reported session or complete transcript response, fail clearly instead of silently returning possibly truncated terminal text.
 - Do not close panes that cagy did not create and verify.
 
 ## Supervisor Workflow
 
 - The user talks to Codex.
-- Codex delegates implementation using `cagy ask "<task>"`.
+- Codex delegates implementation using `cagy ask --stdin` with a single-quoted heredoc so backticks, dollar signs, quotes, and other shell syntax remain literal.
 - Codex should not edit the same files while agy is working.
 - After agy finishes, Codex reviews the changes and relevant tests before reporting completion.
 

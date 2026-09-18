@@ -103,9 +103,13 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		if taskStarted {
 			prompt = continuationPrompt(originalTask)
 		}
+		if err := a.replaceTrackedPrompt(resumed, prompt, checkpoint, taskPhaseSubmitting); err != nil {
+			return "", fmt.Errorf("save resumed task state before submission: %w", err)
+		}
 		result, taskErr := a.runDeveloperTask(ctx, info.developer, prompt, before, checkpoint)
 		taskStarted = true
 		if result.quotaExhausted {
+			a.warnTrackedPhase(taskPhaseRecovering, result.agent)
 			lastErr = fmt.Errorf("resumed agy account also reached quota")
 			currentDeveloper = resumed
 			if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {

@@ -248,6 +248,43 @@ func TestRunDeveloperTaskIgnoresOldQuotaTextOnVisibleScreen(t *testing.T) {
 	runner.assertDone()
 }
 
+func TestRunDeveloperTaskWaitsForTranscriptBackgroundTask(t *testing.T) {
+	brainRoot := t.TempDir()
+	task := "wait for background completion"
+	taskID := testConversationID + "/task-741"
+	writeAgyTaskOnly(t, brainRoot, testConversationID, task)
+	appendAgyEvent(t, brainRoot, testConversationID, "MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+taskID)
+	appendAgyAnswer(t, brainRoot, testConversationID, "Still waiting.")
+	steps := []runStep{
+		{want: []string{"herdr", "agent", "prompt", "developer", task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nStill waiting.\n")},
+		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
+		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult(">\n? for shortcuts\n")},
+		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, before: func() {
+			appendAgyEvent(t, brainRoot, testConversationID, "SYSTEM", "SYSTEM_MESSAGE", "DONE", "sender="+taskID+" content=finished")
+		}, result: jsonError("timeout", "timed out")},
+		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult(">\n? for shortcuts\n")},
+		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, before: func() {
+			appendAgyAnswer(t, brainRoot, testConversationID, "Final background answer.")
+		}, result: jsonError("timeout", "timed out")},
+		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult(">\n? for shortcuts\n")},
+	}
+	runner := &scriptedRunner{t: t, steps: steps}
+	application := New(runner, &strings.Builder{}, &strings.Builder{})
+	application.agyBrainRoot = brainRoot
+	application.transcriptWait = time.Second
+	application.missingTranscriptWait = 5 * time.Second
+
+	result, err := application.runDeveloperTask(context.Background(), "developer", task, "old\n", transcript.Checkpoint{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.output != "Final background answer." {
+		t.Fatalf("result=%+v", result)
+	}
+	runner.assertDone()
+}
+
 func TestRunDeveloperTaskStableIdleWithoutTranscriptFailsClearly(t *testing.T) {
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
@@ -264,6 +301,7 @@ func TestRunDeveloperTaskStableIdleWithoutTranscriptFailsClearly(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: steps}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
 	application.agyBrainRoot = brainRoot
+	application.missingTranscriptWait = 3 * time.Second
 
 	_, err := application.runDeveloperTask(context.Background(), "developer", "do the work", "old\n", transcript.Checkpoint{})
 	if err == nil || !strings.Contains(err.Error(), "without a complete transcript response") {
@@ -312,7 +350,8 @@ func TestRunDeveloperTaskStopsAfterThirtyMinuteWaitBudget(t *testing.T) {
 		t.Fatalf("wait policy: segment=%d max=%d", developerWaitSegmentMS, developerMaxWaits)
 	}
 	runner := &watchdogLoopRunner{}
-	application := New(runner, &strings.Builder{}, &strings.Builder{})
+	var stderr strings.Builder
+	application := New(runner, &strings.Builder{}, &stderr)
 	application.developerPoll = 5 * time.Minute
 
 	_, err := application.runDeveloperTask(context.Background(), "developer", "do the work", "old\n", transcript.Checkpoint{})
@@ -327,6 +366,10 @@ func TestRunDeveloperTaskStopsAfterThirtyMinuteWaitBudget(t *testing.T) {
 	}
 	if runner.modelCalls != developerMaxWaits || runner.quotaCalls != developerMaxWaits {
 		t.Fatalf("probe calls: model=%d quota=%d want=%d", runner.modelCalls, runner.quotaCalls, developerMaxWaits)
+	}
+	status := stderr.String()
+	if !strings.Contains(status, "submitting one task") || !strings.Contains(status, "still running after 5m0s") || !strings.Contains(status, "still running after 30m0s") {
+		t.Fatalf("missing lifecycle heartbeat in stderr: %q", status)
 	}
 }
 
@@ -507,6 +550,25 @@ func appendAgyAnswer(t *testing.T, brainRoot, sessionID, answer string) {
 		"type":    "PLANNER_RESPONSE",
 		"status":  "DONE",
 		"content": answer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appendAgyEvent(t *testing.T, brainRoot, sessionID, source, eventType, status, content string) {
+	t.Helper()
+	path := filepath.Join(brainRoot, sessionID, ".system_generated", "logs", "transcript.jsonl")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(map[string]string{
+		"source":  source,
+		"type":    eventType,
+		"status":  status,
+		"content": content,
 	}); err != nil {
 		t.Fatal(err)
 	}

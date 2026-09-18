@@ -245,3 +245,151 @@ func TestFinalResponseForUsesIndependentFullOffset(t *testing.T) {
 		t.Fatalf("got=%q found=%v", got, found)
 	}
 }
+
+func TestFinalResponseHashMatchesWithoutTaskPlaintext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	task := "Use `literal backticks` and $HOME safely"
+	content := strings.Join([]string{
+		`{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nother task\n</USER_REQUEST>"}`,
+		`{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Wrong answer"}`,
+		`{"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nUse ` + "`literal backticks`" + ` and $HOME safely\n</USER_REQUEST>"}`,
+		`{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Exact answer"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response, found, err := FinalResponseHash(path, 0, TaskHash(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || response != "Exact answer" {
+		t.Fatalf("found=%v response=%q", found, response)
+	}
+	if _, found, err := FinalResponseHash(path, 0, strings.Repeat("0", 64)); err != nil || found {
+		t.Fatalf("mismatch found=%v err=%v", found, err)
+	}
+	if _, found, err := FinalResponseHash(path, 0, "not-a-hash"); err != nil || found {
+		t.Fatalf("invalid hash found=%v err=%v", found, err)
+	}
+}
+
+func TestFinalResponseHashNeverReturnsMatchingTaskBeforeCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	task := "repeatable task"
+	old := event("USER_EXPLICIT", "USER_INPUT", "DONE", wrappedTask(task)) +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "old answer")
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	offset := int64(len(old))
+	newContent := event("USER_EXPLICIT", "USER_INPUT", "DONE", wrappedTask("different task")) +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "different answer")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(newContent); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response, found, err := FinalResponseHash(path, offset, TaskHash(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found || response != "" {
+		t.Fatalf("returned pre-checkpoint answer: found=%v response=%q", found, response)
+	}
+}
+
+func TestFinalResponseWaitsForBackgroundTaskAndPostCompletionReply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	task := "wait for background work"
+	taskID := testSessionID + "/task-741"
+	base := event("USER_EXPLICIT", "USER_INPUT", "DONE", wrappedTask(task)) +
+		event("MODEL", "GENERIC", "RUNNING", "Created At: now\nTool is running as a background task with task id: "+taskID+"\nTask Description: timer") +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "Still waiting.")
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if response, found, err := FinalResponseHash(path, 0, TaskHash(task)); err != nil || found || response != "" {
+		t.Fatalf("pending task returned response=%q found=%v err=%v", response, found, err)
+	}
+
+	completion := event("SYSTEM", "SYSTEM_MESSAGE", "DONE", "<SYSTEM_MESSAGE>\n[Message] sender="+taskID+" content=finished\n</SYSTEM_MESSAGE>")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(completion); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if response, found, err := FinalResponseHash(path, 0, TaskHash(task)); err != nil || found || response != "" {
+		t.Fatalf("completion without new reply returned response=%q found=%v err=%v", response, found, err)
+	}
+
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(event("MODEL", "PLANNER_RESPONSE", "DONE", "Final answer.")); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response, found, err := FinalResponseHash(path, 0, TaskHash(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || response != "Final answer." {
+		t.Fatalf("response=%q found=%v", response, found)
+	}
+}
+
+func TestFinalResponseWaitsForEveryBackgroundTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	task := "two background tasks"
+	first := testSessionID + "/task-1"
+	second := testSessionID + "/task-2"
+	content := event("USER_EXPLICIT", "USER_INPUT", "DONE", wrappedTask(task)) +
+		event("MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+first) +
+		event("MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+second) +
+		event("SYSTEM", "SYSTEM_MESSAGE", "DONE", "sender="+first) +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "First finished.")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if response, found, err := FinalResponseHash(path, 0, TaskHash(task)); err != nil || found || response != "" {
+		t.Fatalf("response=%q found=%v err=%v", response, found, err)
+	}
+}
+
+func TestFinalResponseAcceptsReplyAfterBackgroundCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	task := "cancel timer"
+	taskID := testSessionID + "/task-9"
+	content := event("USER_EXPLICIT", "USER_INPUT", "DONE", wrappedTask(task)) +
+		event("MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+taskID) +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "Waiting.") +
+		event("MODEL", "GENERIC", "DONE", "Task \""+taskID+"\" cancelled.") +
+		event("MODEL", "PLANNER_RESPONSE", "DONE", "Cancelled and finished.")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response, found, err := FinalResponseHash(path, 0, TaskHash(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || response != "Cancelled and finished." {
+		t.Fatalf("response=%q found=%v", response, found)
+	}
+}

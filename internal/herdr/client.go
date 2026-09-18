@@ -38,12 +38,24 @@ type PaneInfo struct {
 	TabID         string            `json:"tab_id"`
 	CWD           string            `json:"cwd"`
 	ForegroundCWD string            `json:"foreground_cwd"`
+	Label         string            `json:"label"`
 	Agent         string            `json:"agent"`
 	AgentStatus   string            `json:"agent_status"`
+	Tokens        map[string]string `json:"tokens"`
 	AgentSession  *AgentSessionInfo `json:"agent_session"`
 }
 
 // AgentInfo contains only the Herdr agent fields cagy needs.
+type PaneProcess struct {
+	Name string   `json:"name"`
+	Argv []string `json:"argv"`
+}
+
+type PaneProcessInfo struct {
+	PaneID              string        `json:"pane_id"`
+	ForegroundProcesses []PaneProcess `json:"foreground_processes"`
+}
+
 type AgentInfo struct {
 	Name          string            `json:"name"`
 	PaneID        string            `json:"pane_id"`
@@ -63,6 +75,14 @@ type envelope struct {
 
 type paneResult struct {
 	Pane PaneInfo `json:"pane"`
+}
+
+type paneListResult struct {
+	Panes []PaneInfo `json:"panes"`
+}
+
+type paneProcessResult struct {
+	ProcessInfo PaneProcessInfo `json:"process_info"`
 }
 
 type agentResult struct {
@@ -87,6 +107,34 @@ func (c *Client) CurrentPane(ctx context.Context) (PaneInfo, error) {
 	return result.Pane, nil
 }
 
+func (c *Client) GetPane(ctx context.Context, paneID string) (PaneInfo, error) {
+	var result paneResult
+	if err := c.json(ctx, &result, "pane", "get", paneID); err != nil {
+		return PaneInfo{}, err
+	}
+	return result.Pane, nil
+}
+
+func (c *Client) ListPanes(ctx context.Context, workspaceID string) ([]PaneInfo, error) {
+	var result paneListResult
+	args := []string{"pane", "list"}
+	if workspaceID != "" {
+		args = append(args, "--workspace", workspaceID)
+	}
+	if err := c.json(ctx, &result, args...); err != nil {
+		return nil, err
+	}
+	return result.Panes, nil
+}
+
+func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (PaneProcessInfo, error) {
+	var result paneProcessResult
+	if err := c.json(ctx, &result, "pane", "process-info", "--pane", paneID); err != nil {
+		return PaneProcessInfo{}, err
+	}
+	return result.ProcessInfo, nil
+}
+
 func (c *Client) SplitRight(ctx context.Context, cwd string) (PaneInfo, error) {
 	var result paneResult
 	if err := c.json(ctx, &result, "pane", "split", "--current", "--direction", "right", "--cwd", cwd, "--no-focus"); err != nil {
@@ -102,13 +150,46 @@ func (c *Client) RenamePane(ctx context.Context, paneID, label string) error {
 // ReportAgentDisplay sets a presentation-only sidebar label for one detected
 // agent. The agent guard prevents the label from leaking to a different agent
 // that later runs in the same pane.
-func (c *Client) ReportAgentDisplay(ctx context.Context, paneID, source, agent, display, role string) error {
+func (c *Client) ReportAgentDisplay(ctx context.Context, paneID, source, agent, display string) error {
 	return c.json(ctx, nil,
 		"pane", "report-metadata", paneID,
 		"--source", source,
 		"--agent", agent,
 		"--display-agent", display,
+	)
+}
+
+// ReportPaneOwnership records stable cagy ownership independently of the agent
+// process. These tokens remain available while agy is stopped, which lets cagy
+// repair a missing managed agent without claiming unrelated panes.
+func (c *Client) ReportPaneOwnership(ctx context.Context, paneID, source, owner, role string) error {
+	return c.json(ctx, nil,
+		"pane", "report-metadata", paneID,
+		"--source", source,
+		"--token", "cagy_owner="+owner,
 		"--token", "cagy_role="+role,
+	)
+}
+
+// ReportPaneSession persists the exact agy conversation identity independently
+// of the running process. It lets a later repair resume this session instead
+// of guessing which conversation is most recent.
+func (c *Client) ReportPaneSession(ctx context.Context, paneID, source, sessionID string) error {
+	return c.json(ctx, nil,
+		"pane", "report-metadata", paneID,
+		"--source", source,
+		"--token", "cagy_session="+sessionID,
+		"--token", "cagy_session_state=ready",
+	)
+}
+
+// ReportPaneSessionPending marks a cagy-started fresh agy process whose first
+// prompt has not run yet, so Herdr cannot have reported a conversation ID.
+func (c *Client) ReportPaneSessionPending(ctx context.Context, paneID, source string) error {
+	return c.json(ctx, nil,
+		"pane", "report-metadata", paneID,
+		"--source", source,
+		"--token", "cagy_session_state=pending",
 	)
 }
 
@@ -116,11 +197,23 @@ func (c *Client) ClosePane(ctx context.Context, paneID string) error {
 	return c.json(ctx, nil, "pane", "close", paneID)
 }
 
-func (c *Client) StartAgy(ctx context.Context, name, paneID string, resume bool) (AgentInfo, error) {
+func (c *Client) StartAgy(ctx context.Context, name, paneID string) (AgentInfo, error) {
 	args := []string{"agent", "start", name, "--kind", "agy", "--pane", paneID, "--timeout", "60000", "--"}
-	if resume {
-		args = append(args, "--continue")
+	return c.startAgyWithArgs(ctx, args)
+}
+
+// StartAgyWithSession resumes one exact agy conversation. Fresh sessions must
+// use StartAgy so a missing identity can never silently become a new session.
+func (c *Client) StartAgyWithSession(ctx context.Context, name, paneID, sessionID string) (AgentInfo, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return AgentInfo{}, fmt.Errorf("agy conversation ID is required")
 	}
+	args := []string{"agent", "start", name, "--kind", "agy", "--pane", paneID, "--timeout", "60000", "--", "--conversation", sessionID}
+	return c.startAgyWithArgs(ctx, args)
+}
+
+func (c *Client) startAgyWithArgs(ctx context.Context, args []string) (AgentInfo, error) {
 	args = append(args, "--dangerously-skip-permissions", "--mode", "accept-edits")
 	var result agentResult
 	if err := c.json(ctx, &result, args...); err != nil {

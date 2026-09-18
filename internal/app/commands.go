@@ -38,57 +38,93 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) error {
 	if current.WorkspaceID != workspaceID {
 		return fmt.Errorf("herdr current pane is in another workspace")
 	}
+	if strings.TrimSpace(current.TabID) == "" {
+		return fmt.Errorf("cagy supervisor tab is missing")
+	}
+	developerName := developerName(workspaceID, current.PaneID)
+	startInfo := runtimeContext{
+		workspaceID:   workspaceID,
+		supervisor:    current.PaneID,
+		developer:     developerName,
+		developerPane: "",
+		project:       project,
+	}
+	if err := a.markPaneRole(ctx, current.PaneID, developerName, "supervisor"); err != nil {
+		return fmt.Errorf("mark cagy supervisor: %w", err)
+	}
 	supervisorDisplayName := compactSupervisorDisplayName
 	if showAgents {
 		supervisorDisplayName = expandedSupervisorDisplayName
 	}
-	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, "codex", supervisorDisplayName, "supervisor"); err != nil {
+	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, "codex", supervisorDisplayName); err != nil {
 		return fmt.Errorf("label cagy supervisor: %w", err)
 	}
 	if err := a.configureSidebar(ctx, showAgents); err != nil {
 		return fmt.Errorf("configure cagy sidebar: %w", err)
 	}
 
-	developerName := developerName(workspaceID, current.PaneID)
 	developer, getErr := a.herdr.GetAgent(ctx, developerName)
 	switch {
 	case getErr == nil:
-		if err := validateDeveloper(developer, workspaceID, project); err != nil {
+		if err := a.validateExistingDeveloper(ctx, developer, startInfo, current); err != nil {
 			return err
 		}
 		if developer.AgentStatus != "idle" && developer.AgentStatus != "done" {
 			return fmt.Errorf("developer is %s; check the right pane", developer.AgentStatus)
 		}
-		if err := a.herdr.ReportAgentDisplay(ctx, developer.PaneID, developerDisplaySource, "agy", developerDisplayName, "developer"); err != nil {
-			return fmt.Errorf("label cagy developer: %w", err)
+		if err := a.markDeveloperPane(ctx, startInfo, developer.PaneID); err != nil {
+			return err
+		}
+		if err := a.persistDeveloperSessionIfReported(ctx, developer); err != nil {
+			return fmt.Errorf("save existing agy conversation identity: %w", err)
 		}
 	case herdr.IsCode(getErr, "agent_not_found"):
 		pane, err := a.herdr.SplitRight(ctx, project)
 		if err != nil {
 			return fmt.Errorf("create developer pane: %w", err)
 		}
-		if pane.WorkspaceID != workspaceID {
+		if err := validatePaneScope(pane, startInfo, current); err != nil {
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return fmt.Errorf("new developer pane was created in another workspace")
+			return fmt.Errorf("new developer pane is unsafe: %w", err)
 		}
 		_ = a.herdr.RenamePane(ctx, current.PaneID, "Codex Supervisor")
-		_ = a.herdr.RenamePane(ctx, pane.PaneID, "agy Developer")
-		developer, err = a.herdr.StartAgy(ctx, developerName, pane.PaneID, false)
-		if err != nil {
-			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return fmt.Errorf("start agy developer: %w", err)
-		}
-		if err := validateDeveloper(developer, workspaceID, project); err != nil {
+		_ = a.herdr.RenamePane(ctx, pane.PaneID, developerPaneLabel)
+		if err := a.markPaneRole(ctx, pane.PaneID, developerName, "developer"); err != nil {
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
 			return err
 		}
-		if err := a.herdr.ReportAgentDisplay(ctx, pane.PaneID, developerDisplaySource, "agy", developerDisplayName, "developer"); err != nil {
+		developer, err = a.herdr.StartAgy(ctx, developerName, pane.PaneID)
+		switch {
+		case err == nil:
+			if err := validateDeveloperSession(developer, startInfo, current); err != nil {
+				return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
+			}
+			if err := a.markDeveloperPane(ctx, startInfo, pane.PaneID); err != nil {
+				return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
+			}
+			if err := a.recordFreshDeveloperSessionState(ctx, developer); err != nil {
+				return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
+			}
+			if err := a.ensureAgyReady(ctx, pane.PaneID); err != nil {
+				return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, fmt.Errorf("prepare agy developer: %w", err))
+			}
+		case herdr.IsCode(err, "agent_name_taken"):
+			existing, getErr := a.herdr.GetAgent(ctx, developerName)
+			if getErr == nil && a.validateExistingDeveloper(ctx, existing, startInfo, current) == nil {
+				if closeErr := a.confirmClosePane(ctx, pane.PaneID); closeErr != nil {
+					return fmt.Errorf("clean up redundant developer pane %s: %w", pane.PaneID, closeErr)
+				}
+				if existing.AgentStatus != "idle" && existing.AgentStatus != "done" {
+					return fmt.Errorf("developer is %s; check the right pane", existing.AgentStatus)
+				}
+				developer = existing
+				break
+			}
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return fmt.Errorf("label cagy developer: %w", err)
-		}
-		if err := a.ensureAgyReady(ctx, pane.PaneID); err != nil {
+			return fmt.Errorf("start agy developer: %w", err)
+		default:
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return fmt.Errorf("prepare agy developer: %w", err)
+			return fmt.Errorf("start agy developer: %w", err)
 		}
 	case getErr != nil:
 		return fmt.Errorf("check existing developer: %w", getErr)
@@ -120,7 +156,7 @@ func (a *App) doctor(ctx context.Context) error {
 		check(executable+" on PATH", err)
 	}
 	check("Codex YOLO flag", a.commandSucceeds(ctx, "codex", "--yolo", "--help"))
-	check("agy YOLO and quota probe flags", a.helpContains(ctx, []string{"agy", "--help"}, "--dangerously-skip-permissions", "accept-edits", "--continue", "--print", "--output-format", "--print-timeout"))
+	check("agy YOLO, exact resume, and quota probe flags", a.helpContains(ctx, []string{"agy", "--help"}, "--dangerously-skip-permissions", "accept-edits", "--conversation", "--print", "--output-format", "--print-timeout"))
 	check("Herdr agent automation", a.helpContains(ctx, []string{"herdr", "agent"}, "agent start", "agent prompt", "agent wait", "agy"))
 	check("Herdr pane automation", a.helpContains(ctx, []string{"herdr", "pane"}, "pane split", "pane run", "pane close", "pane report-metadata"))
 	check("Herdr sidebar labels", a.helpContains(ctx, []string{"herdr", "pane", "report-metadata", "--help"}, "--source", "--agent", "--display-agent", "--token"))
@@ -129,6 +165,9 @@ func (a *App) doctor(ctx context.Context) error {
 	check("AGM auto-switch minimum flag", a.helpContains(ctx, []string{"agm", "auto-switch", "--help"}, "--min"))
 	check("Herdr agy transcript integration", a.checkAgyIntegration(ctx))
 	check("current Herdr pane", a.checkCurrentPane(ctx))
+	if a.getenv("CAGY_SUPERVISOR_PANE_ID") != "" && a.getenv("CAGY_PROJECT_DIR") != "" {
+		check("cagy session", a.checkSessionHealth(ctx))
+	}
 
 	if failed {
 		return fmt.Errorf("doctor found problems")
@@ -148,11 +187,8 @@ func (a *App) ask(ctx context.Context, task string) error {
 	}
 	defer lock.release()
 
-	developer, err := a.herdr.GetAgent(ctx, contextInfo.developer)
+	developer, err := a.ensureDeveloper(ctx, contextInfo)
 	if err != nil {
-		return fmt.Errorf("find agy developer: %w", err)
-	}
-	if err := validateDeveloper(developer, contextInfo.workspaceID, contextInfo.project); err != nil {
 		return err
 	}
 	switch developer.AgentStatus {
@@ -181,7 +217,11 @@ func (a *App) ask(ctx context.Context, task string) error {
 	before, _ := a.herdr.ReadAgent(ctx, contextInfo.developer, 400)
 	result, taskErr := a.runDeveloperTask(ctx, contextInfo.developer, task, before, checkpoint)
 	if result.quotaExhausted {
-		recoveredOutput, err := a.recover(ctx, contextInfo, developer, task, true)
+		recoveryDeveloper := developer
+		if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
+			recoveryDeveloper = result.agent
+		}
+		recoveredOutput, err := a.recover(ctx, contextInfo, recoveryDeveloper, task, true)
 		if err != nil {
 			return err
 		}
@@ -191,6 +231,7 @@ func (a *App) ask(ctx context.Context, task string) error {
 	if taskErr != nil {
 		return fmt.Errorf("agy task failed: %w", taskErr)
 	}
+	a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 	if result.agent.AgentStatus == "blocked" {
 		if result.output != "" {
 			fmt.Fprintln(a.stdout, result.output)
@@ -209,6 +250,10 @@ func (a *App) stop(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	supervisor, err := a.supervisorPane(ctx, info)
+	if err != nil {
+		return err
+	}
 	developer, err := a.herdr.GetAgent(ctx, info.developer)
 	if herdr.IsCode(err, "agent_not_found") {
 		fmt.Fprintln(a.stdout, "cagy developer is not running")
@@ -217,10 +262,15 @@ func (a *App) stop(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("find agy developer: %w", err)
 	}
-	if err := validateDeveloper(developer, info.workspaceID, info.project); err != nil {
+	if err := a.validateExistingDeveloper(ctx, developer, info, supervisor); err != nil {
 		return err
 	}
-	_ = a.herdr.SendAgentKeys(ctx, info.developer, "ctrl+c")
+	if err := a.herdr.SendAgentKeys(ctx, info.developer, "ctrl+c"); err != nil {
+		return fmt.Errorf("stop agy developer: %w", err)
+	}
+	if err := a.waitAgentReleased(ctx, info.developer); err != nil {
+		return fmt.Errorf("wait for agy developer to stop: %w", err)
+	}
 	if err := a.herdr.ClosePane(ctx, developer.PaneID); err != nil {
 		return fmt.Errorf("close developer pane: %w", err)
 	}
@@ -229,10 +279,11 @@ func (a *App) stop(ctx context.Context) error {
 }
 
 type runtimeContext struct {
-	workspaceID string
-	supervisor  string
-	developer   string
-	project     string
+	workspaceID   string
+	supervisor    string
+	developer     string
+	developerPane string
+	project       string
 }
 
 func (a *App) context() (runtimeContext, error) {
@@ -244,10 +295,11 @@ func (a *App) context() (runtimeContext, error) {
 	if supervisor == "" {
 		supervisor = a.getenv("HERDR_PANE_ID")
 	}
-	developer := a.getenv("CAGY_DEVELOPER")
-	if developer == "" {
-		developer = developerName(workspaceID, supervisor)
+	developer := developerName(workspaceID, supervisor)
+	if saved := a.getenv("CAGY_DEVELOPER"); saved != "" && saved != developer {
+		return runtimeContext{}, fmt.Errorf("cagy developer identity is stale; restart the supervisor")
 	}
+	developerPane := a.getenv("CAGY_DEVELOPER_PANE_ID")
 	project := a.getenv("CAGY_PROJECT_DIR")
 	if project == "" {
 		var err error
@@ -256,7 +308,7 @@ func (a *App) context() (runtimeContext, error) {
 			return runtimeContext{}, err
 		}
 	}
-	return runtimeContext{workspaceID: workspaceID, supervisor: supervisor, developer: developer, project: filepath.Clean(project)}, nil
+	return runtimeContext{workspaceID: workspaceID, supervisor: supervisor, developer: developer, developerPane: developerPane, project: filepath.Clean(project)}, nil
 }
 
 func (a *App) requireHerdr() error {
@@ -276,6 +328,69 @@ func (a *App) requireExecutables(names ...string) error {
 		}
 	}
 	return nil
+}
+
+func (a *App) checkSessionHealth(ctx context.Context) error {
+	info, err := a.context()
+	if err != nil {
+		return err
+	}
+	supervisor, err := a.supervisorPane(ctx, info)
+	if err != nil {
+		return err
+	}
+	developer, err := a.herdr.GetAgent(ctx, info.developer)
+	if err == nil {
+		pane, validateErr := a.validatedDeveloperPane(ctx, developer, info, supervisor)
+		if validateErr != nil {
+			return validateErr
+		}
+		liveSessionID, sessionErr := exactAgySessionID(developer)
+		if sessionErr != nil {
+			pendingFresh := (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["cagy_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
+			if !pendingFresh {
+				return fmt.Errorf("exact agy conversation is not ready: %w", sessionErr)
+			}
+		} else {
+			savedSessionID := strings.TrimSpace(pane.Tokens["cagy_session"])
+			if savedSessionID == "" {
+				return fmt.Errorf("developer pane has no saved agy conversation identity; run one successful cagy ask")
+			}
+			if !agyConversationIDPattern.MatchString(savedSessionID) {
+				return fmt.Errorf("developer pane has an invalid saved agy conversation identity")
+			}
+			if savedSessionID != liveSessionID {
+				return fmt.Errorf("saved agy conversation does not match the live conversation")
+			}
+			if pane.Tokens[agySessionStateToken] != agySessionStateReady {
+				return fmt.Errorf("developer pane has an invalid saved agy conversation state")
+			}
+		}
+		panes, listErr := a.herdr.ListPanes(ctx, info.workspaceID)
+		if listErr != nil {
+			return fmt.Errorf("list cagy panes: %w", listErr)
+		}
+		for _, pane := range panes {
+			if pane.PaneID == info.supervisor || pane.PaneID == developer.PaneID || validatePaneScope(pane, info, supervisor) != nil {
+				continue
+			}
+			if pane.Tokens["cagy_owner"] == info.developer && pane.Tokens["cagy_role"] == "recovery" {
+				return fmt.Errorf("recovery pane %s remains; inspect or close it after diagnosis", pane.PaneID)
+			}
+		}
+		return nil
+	}
+	if !herdr.IsCode(err, "agent_not_found") {
+		return fmt.Errorf("find agy developer: %w", err)
+	}
+	pane, repairErr := a.findRepairPane(ctx, info, supervisor)
+	if repairErr != nil {
+		return repairErr
+	}
+	if pane.PaneID != "" {
+		return fmt.Errorf("agy developer is missing; cagy ask can repair pane %s", pane.PaneID)
+	}
+	return fmt.Errorf("agy developer is missing; cagy ask can create a replacement")
 }
 
 func (a *App) checkCurrentPane(ctx context.Context) error {
@@ -345,11 +460,11 @@ func validateDeveloper(agent herdr.AgentInfo, workspaceID, project string) error
 	if agent.WorkspaceID != workspaceID {
 		return fmt.Errorf("cagy developer belongs to another Herdr workspace")
 	}
-	agentProject := agent.ForegroundCWD
-	if agentProject == "" {
-		agentProject = agent.CWD
+	agentProject, err := agentCWD(agent)
+	if err != nil {
+		return err
 	}
-	if filepath.Clean(agentProject) != filepath.Clean(project) {
+	if agentProject != filepath.Clean(project) {
 		return fmt.Errorf("cagy developer belongs to another project: %s", agentProject)
 	}
 	return nil

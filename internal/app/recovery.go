@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kazimshah39/cagy/internal/herdr"
 )
@@ -15,22 +16,38 @@ import (
 const agmConfirmation = "Switch to this account? [y/N]:"
 
 func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.AgentInfo, originalTask string, taskStarted bool) (string, error) {
-	if err := a.closeDeveloper(ctx, info, developer); err != nil {
-		return "", fmt.Errorf("stop quota-limited developer: %w", err)
-	}
-
+	currentDeveloper := developer
 	var lastErr error
 	for attempt := 1; attempt <= maxRecoveryAttempts; attempt++ {
+		identity, err := a.developerRecoveryIdentity(ctx, info, currentDeveloper, !taskStarted)
+		if err != nil {
+			return "", err
+		}
+		currentDeveloper = identity.agent
+		if identity.pending {
+			if err := a.recordFreshDeveloperSessionState(ctx, currentDeveloper); err != nil {
+				return "", fmt.Errorf("save fresh agy state before quota recovery: %w", err)
+			}
+		} else if err := a.persistDeveloperSession(ctx, currentDeveloper.PaneID, currentDeveloper); err != nil {
+			return "", fmt.Errorf("save agy conversation before quota recovery: %w", err)
+		}
+		supervisor, err := a.supervisorPane(ctx, info)
+		if err != nil {
+			return "", err
+		}
 		pane, err := a.herdr.SplitRight(ctx, info.project)
 		if err != nil {
 			lastErr = fmt.Errorf("create recovery pane: %w", err)
 			continue
 		}
-		if pane.WorkspaceID != info.workspaceID {
+		if err := validatePaneScope(pane, info, supervisor); err != nil {
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return "", fmt.Errorf("recovery pane was created in another workspace")
+			return "", fmt.Errorf("recovery pane is unsafe: %w", err)
 		}
-		_ = a.herdr.RenamePane(ctx, pane.PaneID, "agy Recovery")
+		if err := a.markRecoveryPane(ctx, info, pane.PaneID); err != nil {
+			_ = a.herdr.ClosePane(ctx, pane.PaneID)
+			return "", err
+		}
 
 		if _, _, err := a.maybeRefreshAll(ctx, pane.PaneID); err != nil {
 			lastErr = err
@@ -62,25 +79,19 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 			continue
 		}
 
-		_ = a.herdr.RenamePane(ctx, pane.PaneID, "agy Developer")
-		resumed, err := a.herdr.StartAgy(ctx, info.developer, pane.PaneID, true)
+		// Account selection is complete. Remove the owned temporary pane before
+		// stopping agy so a restart failure leaves exactly one repair candidate.
+		if err := a.confirmClosePane(ctx, pane.PaneID); err != nil {
+			return "", fmt.Errorf("close successful recovery pane before restart: %w; original developer was kept", err)
+		}
+		var resumed herdr.AgentInfo
+		if identity.pending {
+			resumed, err = a.restartFreshDeveloperInPlace(ctx, info, currentDeveloper)
+		} else {
+			resumed, err = a.restartDeveloperInPlace(ctx, info, currentDeveloper)
+		}
 		if err != nil {
-			lastErr = fmt.Errorf("restart agy: %w", err)
-			a.closeFailedRecoveryPane(ctx, pane.PaneID, attempt)
-			continue
-		}
-		if err := validateDeveloper(resumed, info.workspaceID, info.project); err != nil {
-			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return "", err
-		}
-		if err := a.herdr.ReportAgentDisplay(ctx, pane.PaneID, developerDisplaySource, "agy", developerDisplayName, "developer"); err != nil {
-			_ = a.herdr.ClosePane(ctx, pane.PaneID)
-			return "", fmt.Errorf("label resumed cagy developer: %w", err)
-		}
-		if err := a.ensureAgyReady(ctx, pane.PaneID); err != nil {
-			lastErr = fmt.Errorf("prepare resumed agy: %w", err)
-			a.closeFailedRecoveryPane(ctx, pane.PaneID, attempt)
-			continue
+			return "", fmt.Errorf("quota account switched but developer restart failed: %w", err)
 		}
 
 		checkpoint, checkpointErr := a.transcriptCheckpoint(resumed)
@@ -96,16 +107,16 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		taskStarted = true
 		if result.quotaExhausted {
 			lastErr = fmt.Errorf("resumed agy account also reached quota")
-			if attempt < maxRecoveryAttempts {
-				if err := a.closeDeveloper(ctx, info, resumed); err != nil {
-					return "", err
-				}
+			currentDeveloper = resumed
+			if _, sessionErr := exactAgySessionID(result.agent); sessionErr == nil {
+				currentDeveloper = result.agent
 			}
 			continue
 		}
 		if taskErr != nil {
 			return "", fmt.Errorf("resumed agy task failed: %w", taskErr)
 		}
+		a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 		if result.agent.AgentStatus == "blocked" {
 			return "", fmt.Errorf("resumed developer is blocked; check the right pane")
 		}
@@ -118,7 +129,38 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no usable AGM account was found")
 	}
-	return "", fmt.Errorf("quota recovery failed after %d attempts: %w", maxRecoveryAttempts, lastErr)
+	return "", fmt.Errorf("quota recovery failed after %d attempts: %w; original developer was kept", maxRecoveryAttempts, lastErr)
+}
+
+func (a *App) confirmClosePane(ctx context.Context, paneID string) error {
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		closeErr := a.herdr.ClosePane(ctx, paneID)
+		if closeErr != nil && herdr.IsCode(closeErr, "pane_not_found") {
+			return nil
+		}
+		if closeErr != nil {
+			lastErr = closeErr
+		}
+		_, getErr := a.herdr.GetPane(ctx, paneID)
+		if herdr.IsCode(getErr, "pane_not_found") {
+			return nil
+		}
+		if getErr == nil {
+			lastErr = fmt.Errorf("pane %s is still present", paneID)
+		} else if !herdr.IsCode(getErr, "pane_not_found") {
+			lastErr = getErr
+		}
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	return fmt.Errorf("close pane %s could not be confirmed: %w", paneID, lastErr)
 }
 
 func (a *App) ensureAgyReady(ctx context.Context, paneID string) error {
@@ -144,17 +186,6 @@ func (a *App) closeFailedRecoveryPane(ctx context.Context, paneID string, attemp
 	if attempt < maxRecoveryAttempts {
 		_ = a.herdr.ClosePane(ctx, paneID)
 	}
-}
-
-func (a *App) closeDeveloper(ctx context.Context, info runtimeContext, developer herdr.AgentInfo) error {
-	if err := validateDeveloper(developer, info.workspaceID, info.project); err != nil {
-		return err
-	}
-	_ = a.herdr.SendAgentKeys(ctx, info.developer, "ctrl+c")
-	if err := a.herdr.ClosePane(ctx, developer.PaneID); err != nil {
-		return fmt.Errorf("close developer pane: %w", err)
-	}
-	return nil
 }
 
 func (a *App) runAutoSwitch(ctx context.Context, paneID string) (string, int, error) {

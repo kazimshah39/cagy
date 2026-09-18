@@ -17,7 +17,7 @@ Do not turn this into a general multi-agent framework.
 - Support only Codex and agy.
 - Always launch Codex with `--yolo --dangerously-bypass-hook-trust`, a per-invocation trusted-project override, and supervisor text through the `developer_instructions` config override. Never send supervisor instructions as an initial user task.
 - Always launch agy with `--dangerously-skip-permissions --mode accept-edits`.
-- Resume agy with `--continue` plus the same YOLO flags.
+- Resume agy with the exact Herdr-reported conversation ID (`--conversation <id>`) plus the same YOLO flags. Never use ambiguous `--continue` when a prior session identity is available.
 - Do not add a safe-mode switch that removes these required flags.
 - `agm` is an unchanged external CLI dependency. Never fork, patch, vendor, import, or read its database.
 - Keep AGM recovery visible in the developer pane.
@@ -78,18 +78,20 @@ agy -p "/quota" --output-format json --print-timeout 30s
 
 Use `/model` to select the matching quota group. Never switch accounts from a spinner, the word `quota` alone, an unknown model, malformed JSON, or a failed probe. Continue waiting instead. The original task must be submitted only once.
 
-Recovery is visible and limited to two attempts:
+Recovery is visible, transactional at the pane lifecycle level, and limited to two attempts:
 
-1. Stop and close the verified developer pane.
-2. Create a fresh right pane.
+1. Refresh and verify the live developer before every AGM switch attempt. Require and persist Herdr's exact agy conversation ID, except that a cagy-created fresh process may be `cagy_session_state=pending` before its first prompt and can only restart fresh. Keep the verified developer running while account selection is attempted.
+2. Create a fresh, cagy-owned right recovery pane. Persist `cagy_owner` and `cagy_role` metadata so ownership remains verifiable even when no agent is running.
 3. If the last confirmed bulk refresh was at least one hour ago, run `agm refresh-all`; never run it from an idle timer. Require its completion summary to show at least one successful refresh. Completion waits must match a numeric marker, not the marker text echoed in the shell command.
-4. Run `agm auto-switch --min 5`.
-5. Answer its confirmation with `y`.
-6. Accept an IDE-only partial failure only when output confirms the agy credential switched.
-7. Immediately verify the switched account with the same `/model` and `/quota` probes. Reject low, unknown, or unreadable quota.
-8. Start agy with `--continue` and the required YOLO flags.
-9. Send the original task if recovery happened during preflight. Otherwise, ask agy to inspect existing work and continue without repeating completed work.
-10. Leave the final right pane visible if recovery is exhausted.
+4. Run `agm auto-switch --min 5` and answer its confirmation with `y`.
+5. Accept an IDE-only partial failure only when output confirms the agy credential switched.
+6. Immediately verify the switched account with the same `/model` and `/quota` probes. Reject low, unknown, or unreadable quota without stopping the developer.
+7. After a healthy switch, confirm the closure of the temporary recovery pane with retries before touching agy. Never stop the original developer if closure cannot be confirmed. Once confirmed, stop agy in its developer pane, wait a bounded time for Herdr to release the deterministic agent name, and restart agy in the same pane with the exact saved conversation ID (`--conversation <id>`) plus the required YOLO flags.
+8. Send the original task if recovery happened during preflight. Otherwise, ask agy to inspect existing work and continue without repeating completed work.
+9. If recovery is exhausted, leave the final recovery pane visible and keep the original named developer registered.
+10. If a developer is unexpectedly missing, `cagy ask` may repair exactly one same-workspace, same-tab, same-project cagy-owned pane (`cagy_owner`, `cagy_role`, and a valid `cagy_session` are required for an existing pane). A newly created replacement starts fresh. Unsafe label-only adoption is prohibited. Inactive panes reused for repair must be verified as interactive shells via Herdr `pane process-info` (unreadable or non-shell processes fail closed).
+11. If `StartAgy` succeeds but subsequent validation, metadata reporting, or prompt readiness fails, cagy stops the started agent with Ctrl+C, waits for name release, leaves a clean owned recovery shell, and reports both original and cleanup errors. If a newly created repair pane hits `agent_name_taken` while the existing developer is valid, the extra pane is closed.
+12. `cagy stop` validates supervisor and developer ownership and scope first, and never closes a pane if Ctrl+C fails. Unknown working directories fail closed.
 
 ## Security
 

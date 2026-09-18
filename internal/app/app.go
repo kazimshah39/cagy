@@ -20,6 +20,7 @@ const (
 	agyReadyTimeoutMS        = 60 * 1000
 	maxRecoveryAttempts      = 2
 
+	paneOwnershipSource           = "cagy:pane-owner"
 	supervisorDisplaySource       = "cagy:supervisor-display"
 	developerDisplaySource        = "cagy:developer-display"
 	compactSupervisorDisplayName  = "cagy"
@@ -45,24 +46,26 @@ type App struct {
 	agyBrainRoot     string
 	transcriptWait   time.Duration
 	developerPoll    time.Duration
+	agentStopTimeout time.Duration
 	configureSidebar func(context.Context, bool) error
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 	herdrClient := herdr.New(runner)
 	application := &App{
-		runner:         runner,
-		herdr:          herdrClient,
-		stdout:         stdout,
-		stderr:         stderr,
-		getenv:         os.Getenv,
-		environ:        os.Environ,
-		tempDir:        os.TempDir(),
-		token:          randomToken,
-		now:            time.Now,
-		agyBrainRoot:   defaultAgyBrainRoot(),
-		transcriptWait: 3 * time.Second,
-		developerPoll:  time.Second,
+		runner:           runner,
+		herdr:            herdrClient,
+		stdout:           stdout,
+		stderr:           stderr,
+		getenv:           os.Getenv,
+		environ:          os.Environ,
+		tempDir:          os.TempDir(),
+		token:            randomToken,
+		now:              time.Now,
+		agyBrainRoot:     defaultAgyBrainRoot(),
+		transcriptWait:   3 * time.Second,
+		developerPoll:    time.Second,
+		agentStopTimeout: 10 * time.Second,
 	}
 	application.configureSidebar = func(ctx context.Context, showAgents bool) error {
 		if showAgents {

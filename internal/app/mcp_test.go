@@ -272,7 +272,7 @@ func TestMCPDelegateTaskSuccess(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n" + answer + "\n")},
 		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
@@ -334,7 +334,7 @@ func TestMCPLiteralTask(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n" + answer + "\n")},
 		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
@@ -684,7 +684,7 @@ func TestMCPConcurrentDelegation(t *testing.T) {
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
 		{
-			want:   []string{"herdr", "agent", "prompt", developer, task1, "--wait", "--timeout", "300000"},
+			want:   []string{"herdr", "agent", "prompt", developer, task1, "--wait", "--timeout", "30000"},
 			result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID),
 			before: func() {
 				// While goroutine 1 holds the developer lock, notify goroutine 2 to attempt delegation

@@ -46,15 +46,15 @@ Go fits this project better than Python or Rust:
 - easy cross-compilation;
 - less complexity than Rust for a small CLI orchestrator.
 
-Runtime speed is mostly controlled by Codex, agy, Herdr, and AGM, so Rust would add build complexity without a useful user-visible speed gain.
+Runtime speed is mostly controlled by Codex, agy, and Herdr, so Rust would add build complexity without a useful user-visible speed gain. The supported runtime and release target is Apple Silicon macOS (`darwin/arm64`).
 
 ## Commands
 
 ```bash
 cagy [DIRECTORY]                     # Start with one Codex-based cagy sidebar row
 cagy --show-agents [DIRECTORY]       # Show both supervisor and developer rows
-cagy doctor                          # Check Herdr context and required CLIs
-cagy stop                            # Close the verified developer pane
+cagy doctor                          # Check Herdr, required CLIs, and native account health
+cagy stop                            # Safely interrupt, stop, and close the verified developer pane
 cagy mcp-server                      # Internal: local stdio MCP server for Codex (not for direct use)
 
 # Compatibility/emergency CLI commands (Codex uses native MCP tools in normal operation)
@@ -94,14 +94,14 @@ Executables on `PATH`:
 - `herdr`
 - `codex`
 - `agy`
-- `agm`
 - Herdr's current `antigravity-cli` integration, installed with `herdr integration install antigravity-cli`
+- macOS Security.framework Keychain (used only for agy's canonical session)
 
 Build dependency:
 
 - Go 1.25 or newer (required for source builds; the official MCP Go SDK v1.8.0 requires Go 1.25)
 
-`agm` is used only through its public command line. cagy never imports AGM code, reads its database, or handles its credentials.
+cagy does not depend on any external account manager. It stores imported or explicitly added account snapshots in private atomic 0600 files and non-secret metadata in private atomic files. `cagy accounts add` uses an explicit loopback Google OAuth flow with PKCE and writes only to that local vault; it does not change agy's active session. Normal startup, repair, doctor, and quota monitoring leave agy's canonical Keychain item under agy's control. Confirmed quota recovery automatically stops the verified developer, refreshes and validates the selected local credential, replaces the canonical item through the AGM-compatible `security` delete-and-add allow-all flow, restarts agy in the same pane, and live-probes quota. This avoids legacy ACL password dialogs and never opens OAuth. Account commands and metadata-only exports show full labels and email addresses for this personal-machine workflow; credential material and OAuth tokens remain excluded. Explicit manual switching uses the same activation transaction but is an emergency/admin command rather than the normal recovery path.
 
 ## Start Flow
 
@@ -129,21 +129,21 @@ If the same verified developer already exists, cagy reuses it instead of making 
 1. Acquires one per-developer private lock. Dead-owner locks are reclaimed; live locks remain exclusive. There is no queue.
 2. Refuses to submit new work when an unresolved task journal exists, preventing duplicate side effects after caller interruption.
 3. Resolves the named developer and validates its workspace and project.
-4. Checks agy's machine-readable `/model` and `/quota` status before submitting work. If the confirmed quota is low, recovery happens first. A failed or unknown probe does not cause a blind switch.
+4. Checks agy's machine-readable `/model` and `/quota` status before submitting work. If quota is confirmed low, cagy starts bounded automatic account recovery before submitting the original task. A failed or unknown probe never causes a switch.
 5. Resolves Herdr's agy conversation ID and records separate byte offsets for `transcript.jsonl` and `transcript_full.jsonl` when the session already exists.
 6. Reads a baseline of recent developer output for visible status and quota-error checks.
-7. Sends the task once with `herdr agent prompt --wait` using a five-minute wait segment.
+7. Sends the task once with `herdr agent prompt --wait` using a 30-second initial wait.
 8. Treats Herdr `idle` and `done` results as hints only because they can appear briefly while agy is still processing. Subsequent Herdr waits match only `blocked`.
 9. Reads the current visible screen only for lifecycle markers. `esc to cancel` or a non-zero `task(s)` footer count means working. `? for shortcuts` without either working signal means idle. Marker text in old response content is ignored.
 10. Requires the real idle footer to remain stable for the transcript flush grace period. A non-empty planner message seen while agy is working can be only a progress update, so it is not returned early. Transcript `GENERIC/RUNNING` background-task events also keep the task active even if the footer temporarily looks idle; cagy waits for that task's completion signal and a later non-empty planner response.
-11. If a five-minute prompt wait times out, reads new terminal output and checks `/model` and `/quota` again. A five-second `agent_prompt_stalled` result does not consume a five-minute segment. The task is never resent.
+11. After the initial wait, polls visible state every second, probes agy's current session every 45 seconds, and sends a user-facing heartbeat every five minutes. A 30-second initial timeout or `agent_prompt_stalled` result does not cause task resubmission.
 12. Stops waiting after the fixed 30-minute task budget.
 13. After stable completion, resolves the conversation reported by Herdr and reads only new JSONL events after the checkpoint. It matches the exact task's `USER_INPUT`, then returns the last non-empty `MODEL` + `PLANNER_RESPONSE` + `DONE` content.
 14. Uses `transcript_full.jsonl` whenever it exists because the compact `transcript.jsonl` can truncate long content. The compact file is only a fallback when the full file does not exist.
 15. Never prints model reasoning, tool events, system messages, old turns, the full transcript, or terminal scrollback from a blocked task. The terminal remains the visible progress/status view but is not the completed-answer transport.
 16. If the session or complete final transcript event is missing, returns a clear error instead of possibly truncated terminal text.
 17. Removes the echoed task before checking strong quota-error patterns, so task examples cannot trigger false recovery.
-18. If strong output evidence or a successful low-quota probe appears, starts visible recovery.
+18. If strong output evidence or a successful low-quota probe appears, starts automatic visible recovery: stop the verified developer, rotate through eligible stored accounts, restart in the same pane, live-probe quota, and continue the task.
 19. Releases the lock.
 
 Herdr still owns panes, identity, blocked detection, and the visible terminal. cagy combines its verified agent/session data with agy's footer, structured transcript events, and background-task lifecycle because no one signal is reliable enough by itself for turn completion.
@@ -163,7 +163,7 @@ After caller loss, `cagy doctor` reconciles the journal without mutating panes. 
 
 The normal supervisor path uses the native cagy MCP tools (`delegate_task`, `task_status`, `recover_task`, `acknowledge_task`). Tasks arrive through structured JSON inputs, never through shell command strings. Shell CLI commands (`cagy ask --stdin`, `--recover`, `--forget`) remain available for emergency, scripting, and manual compatibility use.
 
-Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge.
+Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge. Stop sends one interrupt, waits briefly, then sends a second interrupt automatically if agy is still registered; this handles agy’s cancel-then-exit behavior in one command.
 
 A delivery receipt is returned by `delegate_task` and `recover_task`. Codex must call `acknowledge_task` with the matching receipt to clear completed state. The journal persists as `completed_unacknowledged` until the receipt is acknowledged, so a restarted session can recover the exact answer without resubmitting the task.
 
@@ -184,7 +184,7 @@ rate limit exceeded
 
 A plain use of the word `quota` is not an error. The echoed task is removed before these patterns are checked, so a task that discusses or tests a quota error does not trigger recovery by itself.
 
-Before a new task and whenever a five-minute Herdr wait expires, cagy runs read-only headless checks:
+Before a new task and every 45 seconds while it remains active, cagy runs bound-account headless checks:
 
 ```bash
 agy -p "/model" --output-format json --print-timeout 30s
@@ -193,21 +193,20 @@ agy -p "/quota" --output-format json --print-timeout 30s
 
 The active model chooses either `Gemini Models` or `Claude and GPT models`. The account is healthy only when weekly quota is above 3% and 5-hour quota is above 2%. A weekly `remaining_fraction` of 0.03 or lower, or a 5-hour value of 0.02 or lower, triggers recovery. Unknown models, missing groups, malformed data, and failed probes never trigger an account switch by themselves.
 
-## Visible Transactional AGM Recovery
+## Visible Transactional Native Account Recovery
 
-Recovery is limited to two attempts per task and does not destroy the current developer while account selection is uncertain.
+When a typed agy probe or strong provider output confirms low or exhausted quota, cagy performs automatic recovery. Spinner-only output, malformed probes, and unknown errors never trigger account changes.
 
-1. Refresh and verify the live developer before every AGM switch attempt. Normally require Herdr's exact agy conversation ID and persist it as `cagy_session` with `cagy_session_state=ready`. Before the first prompt only, a cagy-created fresh process may instead have `cagy_session_state=pending`; that process can be restarted fresh because no conversation exists yet. Keep agy running.
-2. Create a fresh right recovery pane in the same project and tab. Mark it with persistent `cagy_owner=<developer-name>` and `cagy_role=recovery` metadata.
-3. If no confirmed bulk refresh was recorded in the last hour, run `agm refresh-all` visibly. This check is lazy: it runs only during recovery, never from a daemon or idle timer. Continue only if its summary reports at least one successful refresh; partial failures remain visible. Wait for a numeric completion marker so the shell's echoed command cannot be mistaken for completion.
-4. Run `agm auto-switch --min 5` visibly, wait for confirmation, and send `y` plus Enter.
-5. A non-zero exit caused only by the IDE is acceptable when `✓ Antigravity CLI (agy)` confirms the CLI credential changed.
-6. Immediately verify the selected account with agy's `/model` and `/quota` JSON commands. A low, unknown, or unreadable account is rejected without stopping the original developer. Intermediate failed recovery panes are closed; the final failed pane stays visible.
-7. After a healthy switch, confirm closure of the temporary recovery pane with retries before touching agy (`pane_not_found` check). If closure cannot be confirmed, abort recovery and keep the original developer running. This guarantees that a later restart failure leaves only one developer repair candidate.
-8. Send Ctrl+C to the verified developer, wait a bounded time for Herdr to release its deterministic name, and restart agy with the exact saved conversation ID in the same developer pane. The pane is never closed during restart.
-9. Restore persistent ownership metadata, the guarded `cagy Developer` display label, project trust handling, and the real input prompt. If post-start validation or readiness fails, cleanly roll back to an owned recovery shell.
-10. If recovery happened before task submission, send the original task. Otherwise, send a continuation task that tells agy to inspect the working tree and avoid repeating completed work.
-11. If quota is hit again, repeat once. If both account attempts fail, return a clear error, leave the last recovery pane visible, and retain the original named developer.
+1. Persist the current account's quota state and task journal before mutation.
+2. Build a deterministic candidate list: fresh known-available accounts first, then stale/unknown accounts that need a live probe. Exclude the current, attempted, missing-credential, disabled, needs-login, active-cooldown, and fresh low/exhausted accounts.
+3. Verify pane ownership, workspace, project, developer target, and conversation identity.
+4. Stop the developer and confirm target release before changing the canonical credential.
+5. For each candidate once: refresh and verify identity, activate through the non-interactive canonical Keychain transaction, restart agy in the same pane, and live-probe `/model` and `/quota`. Persist every result.
+6. Bind the first available account to the pane and continue. Before initial submission, send the original task once. After work has started, resume the exact conversation and send only the generic continuation prompt.
+7. If a candidate also exhausts, stop it and continue through the remaining unique candidates inside the original task budget.
+8. If the pool is exhausted, best-effort restore the original account and visible developer, keep uncertain task state when completion cannot be proven, and return one concise action to add or refresh an account. OAuth is never opened automatically.
+
+A verified fresh `pending` session may be replaced with another fresh session only before the first task, when no conversation work exists. After submission, exact conversation identity is mandatory. The original task is never resent after partial execution.
 
 ## Missing-Developer Self-Healing
 
@@ -226,7 +225,9 @@ Every supervisor/developer pair has a deterministic developer name and persisten
 
 ## Runtime Identity
 
-No database is needed. cagy keeps only small private state files for lock recovery, the AGM refresh timestamp, and interrupted-task reconciliation. cagy derives a stable agent name from:
+No database is needed. cagy keeps only small private state files for lock recovery, interrupted-task reconciliation. cagy derives a stable agent name from:
+
+For the September 2026 local reliability-validation period, real cagy processes also write bounded diagnostics to `~/Library/Application Support/cagy/state/logs/cagy.log`. The logger is always on unless `CAGY_DIAGNOSTICS=0`, rotates at 8 MiB, keeps five backups, and enforces `0700`/`0600` permissions. Entries contain timestamps, PID, source file/line, safe lifecycle metadata, task hashes/byte counts, quota classifications, state transitions, retries, and errors. They must never contain task plaintext, completed answers, receipts, OAuth codes, tokens, passwords, Keychain values, or full transcripts. Go test binaries do not write to the user's real state directory.
 
 - `HERDR_WORKSPACE_ID`
 - the supervisor `HERDR_PANE_ID`
@@ -272,13 +273,12 @@ cagy/
 
 - Project paths and prompts are subprocess argument arrays, never shell strings. Supervisor task text arrives through MCP structured inputs without shell interpolation, is kept out of Codex launch arguments and persistent task state (journal stores only a SHA-256 hash), and is passed directly as a positional argument array element to `herdr agent prompt`.
 - The `cagy mcp-server` child process communicates with Codex only through inherited stdin/stdout. It opens no socket, port, or external connection.
-- Shell text used in recovery contains only fixed AGM commands and random hexadecimal completion markers. Waits require a numeric marker status and cannot match the echoed command's `%s` format.
+- Recovery uses argument arrays and fixed process boundaries; credentials never enter shell text.
 - Pane IDs always come from Herdr JSON.
 - cagy closes only the developer pane it can verify in the current workspace and project.
 - No credentials or complete environment dumps are logged.
-- Herdr waits are split into five-minute segments with a 30-minute budget, and recovery never loops forever.
-- The hourly AGM refresh timestamp contains no credentials.
-- A failed or unknown quota probe cannot switch an account, and every switched account is verified before agy restarts.
+- Visible state is polled every second, bound quota every 45 seconds, healthy stalls at 150 seconds, heartbeats every five minutes, and the overall task budget is 30 minutes; recovery never loops forever.
+- Startup, repair, doctor, and quota probes cannot touch the canonical Keychain item; low quota requires an explicit user account change.
 
 ## Automated Validation
 
@@ -293,4 +293,4 @@ go build ./cmd/cagy
 make verify
 ```
 
-Automated tests use fakes only. With explicit user approval, visible end-to-end tests verified fresh-project trust handling, first-task delivery, quota-triggered AGM refresh and switching, resumed work, and the one-hour refresh skip.
+Automated tests use fakes only. With explicit user approval, visible end-to-end tests may verify fresh-project trust handling, first-task delivery, typed quota exhaustion, explicit account-change guidance, resumed work, and spinner/stall handling.

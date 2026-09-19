@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end installer test suite
-# Validates source builds, piped runs inside clone, env passing, strict modes, collision safety, and checksum rules
+# Validates source builds, piped runs inside clone, env passing, strict modes, collision safety, and checksum rules on darwin/arm64
 
 set -euo pipefail
 
@@ -30,20 +30,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Detect OS and Arch
+# cagy is intentionally tested only on Apple Silicon macOS.
 OS_RAW="$(uname -s)"
-case "$OS_RAW" in
-  Darwin*) OS="darwin" ;;
-  Linux*)  OS="linux" ;;
-  *)       echo "Unsupported test OS: $OS_RAW"; exit 1 ;;
-esac
-
 ARCH_RAW="$(uname -m)"
-case "$ARCH_RAW" in
-  x86_64|amd64) ARCH="amd64" ;;
-  arm64|aarch64) ARCH="arm64" ;;
-  *)            echo "Unsupported test ARCH: $ARCH_RAW"; exit 1 ;;
-esac
+if [ "$OS_RAW" != "Darwin" ] || { [ "$ARCH_RAW" != "arm64" ] && [ "$ARCH_RAW" != "aarch64" ]; }; then
+  echo "SKIP: installer tests require Apple Silicon macOS (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}."
+  exit 0
+fi
+OS="darwin"
+ARCH="arm64"
 
 # ----------------------------------------------------
 # Prepare Mock HTTP Server with Source & Binary Assets
@@ -63,7 +58,7 @@ tar -czf "${SERVER_DIR}/archive.tar.gz" -C "${TEST_TMP}/src_stage" cagy-main
 # 2. Mock prebuilt release binary and checksums
 BIN_STAGE="${TEST_TMP}/bin_stage"
 mkdir -p "${BIN_STAGE}"
-CGO_ENABLED=0 go build -C "${REPO_ROOT}" -trimpath -ldflags "-s -w" -o "${BIN_STAGE}/cagy" ./cmd/cagy
+CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "${REPO_ROOT}" -trimpath -ldflags "-s -w" -o "${BIN_STAGE}/cagy" ./cmd/cagy
 tar -czf "${SERVER_DIR}/${ARCHIVE_NAME}" -C "${BIN_STAGE}" cagy
 
 if command -v sha256sum >/dev/null 2>&1; then

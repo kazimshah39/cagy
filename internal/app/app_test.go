@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kazimshah39/cagy/internal/accounts"
 	"github.com/kazimshah39/cagy/internal/herdr"
 	proc "github.com/kazimshah39/cagy/internal/process"
 )
@@ -135,30 +136,6 @@ func TestTaskLockRejectsConcurrentOwner(t *testing.T) {
 	}
 }
 
-func TestMarkedCommandAndStatus(t *testing.T) {
-	command := markedCommand("agm refresh-all", "__MARK__")
-	if strings.Contains(command, `\"$__cagy_status\"`) {
-		t.Fatalf("status variable was incorrectly escaped: %s", command)
-	}
-	if !strings.Contains(command, `"$__cagy_status"`) {
-		t.Fatalf("status variable is not shell quoted: %s", command)
-	}
-	status, err := markerStatus("done\n__MARK__:7\n", "__MARK__")
-	if err != nil || status != 7 {
-		t.Fatalf("status=%d err=%v", status, err)
-	}
-}
-
-func TestAgySwitchPartialIDESuccess(t *testing.T) {
-	output := "  ✓ Antigravity CLI (agy)\n  ✗ Antigravity IDE: not running\npartial switch failure"
-	if !agySwitchSucceeded(output) {
-		t.Fatal("expected agy success despite IDE failure")
-	}
-	if agySwitchSucceeded("✗ Antigravity CLI (agy): keychain error") {
-		t.Fatal("unexpected agy success")
-	}
-}
-
 func TestResolveProject(t *testing.T) {
 	dir := t.TempDir()
 	resolved, err := resolveProject(dir)
@@ -210,12 +187,9 @@ func contains(values []string, expected string) bool {
 	return false
 }
 
-func TestRecoveryPolicyIsFixed(t *testing.T) {
-	if maxRecoveryAttempts != 2 {
-		t.Fatalf("maxRecoveryAttempts=%d", maxRecoveryAttempts)
-	}
+func TestRecoveryContinuationDoesNotRepeatOriginalTask(t *testing.T) {
 	prompt := continuationPrompt("finish the feature")
-	if !strings.Contains(prompt, "Inspect the current working tree") || !strings.Contains(prompt, "finish the feature") {
+	if !strings.Contains(prompt, "Inspect the current working tree") || strings.Contains(prompt, "finish the feature") {
 		t.Fatalf("continuation prompt=%q", prompt)
 	}
 }
@@ -288,14 +262,18 @@ func TestStartCreatesVisibleDeveloperAndLaunchesCodex(t *testing.T) {
 		{want: []string{"herdr", "pane", "rename", "w1:p2", "agy Developer"}, result: jsonResult(`{"type":"pane_info"}`)},
 		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=developer"}, result: jsonResult(`{"type":"ok"}`)},
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p2", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: jsonResult(`{"type":"agent_started","agent":{"agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","foreground_cwd":"` + project + `"},"argv":[]}`)},
-		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=developer"}, result: jsonResult(`{"type":"ok"}`)},
-		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
-		pendingSessionStep("w1:p2"),
 		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("Do you trust the contents of this project?\n> Yes, I trust this folder\n")},
 		{want: []string{"herdr", "pane", "send-keys", "w1:p2", "enter"}, result: jsonResult(`{"type":"pane_info"}`)},
 		{want: []string{"herdr", "pane", "wait-output", "w1:p2", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", paneOwnershipSource, "--token", "cagy_owner=" + developer, "--token", "cagy_role=developer"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+		pendingSessionStep("w1:p2"),
 	}}
 	application := New(runner, os.Stdout, os.Stderr)
+	application.accountsFactory = func() (*accounts.AccountService, error) {
+		t.Fatal("normal startup must not open the account service or touch the canonical Keychain item")
+		return nil, nil
+	}
 	sidebarCalls := 0
 	application.configureSidebar = func(_ context.Context, showAgents bool) error {
 		sidebarCalls++
@@ -531,7 +509,7 @@ func TestAskReturnsOnlyNewDeveloperOutput(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\nImplemented.\n")},
 		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
@@ -579,7 +557,7 @@ func TestDelegateTaskDoesNotWriteFinalAnswerToStdout(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\nDirect delivery result.\n")},
 		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
@@ -612,75 +590,6 @@ func TestDelegateTaskDoesNotWriteFinalAnswerToStdout(t *testing.T) {
 	}
 }
 
-func TestAskRecoversQuotaWithVisibleAGMPartialIDESuccess(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	task := "Finish the feature"
-	continuation := continuationPrompt(task)
-	brainRoot := t.TempDir()
-	writeAgyTranscript(t, brainRoot, testConversationID, continuation, "Finished after account switch.")
-	refreshMarker := "__CAGY_REFRESH_refresh1__"
-	switchMarker := "__CAGY_SWITCH_switch1__"
-	confirmRegex := `Switch to this account\? \[y/N\]:|` + completionPattern(switchMarker)
-	steps := []runStep{
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "agent", "get", developer}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
-		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
-		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
-		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
-		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nRESOURCE_EXHAUSTED: quota exceeded\n")},
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "agent", "get", developer}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
-		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
-		sessionOwnershipStep("w1:p2", testConversationID),
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p3", "w1:t1", project, recoveryPaneLabel, nil)},
-		{want: []string{"herdr", "pane", "rename", "w1:p3", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p3", developer, "recovery"),
-		{want: []string{"herdr", "pane", "run", "w1:p3", markedCommand("agm refresh-all", refreshMarker)}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--regex", completionPattern(refreshMarker), "--source", "recent-unwrapped", "--lines", "400", "--timeout", "1800000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("Completed: 2 successful\n" + refreshMarker + ":0\n")},
-		{want: []string{"herdr", "pane", "run", "w1:p3", markedCommand("agm auto-switch --min 5", switchMarker)}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--regex", confirmRegex, "--source", "recent-unwrapped", "--lines", "400", "--timeout", "300000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("Best account: test@example.com\n" + agmConfirmation)},
-		{want: []string{"herdr", "pane", "send-text", "w1:p3", "y"}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "send-keys", "w1:p3", "enter"}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--regex", completionPattern(switchMarker), "--source", "recent-unwrapped", "--lines", "400", "--timeout", "300000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("  ✓ Antigravity CLI (agy)\n  ✗ Antigravity IDE: unavailable\n" + switchMarker + ":1\n")},
-		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
-	}
-	steps = append(steps, confirmedCloseSteps("w1:p3")...)
-	steps = append(steps, restartInPlaceSteps(developer, project, "w1:p2")...)
-	steps = append(steps,
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("resumed\n")},
-		runStep{want: []string{"herdr", "agent", "prompt", developer, continuation, "--wait", "--timeout", "300000"}, before: func() {
-			appendAgyTranscript(t, brainRoot, testConversationID, continuation, "Finished after account switch.")
-		}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("resumed\nFinished after account switch.\n")},
-		runStep{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
-		sessionOwnershipStep("w1:p2", testConversationID),
-	)
-	runner := &scriptedRunner{t: t, steps: steps}
-	var stdout strings.Builder
-	application := New(runner, &stdout, os.Stderr)
-	application.stateDir = t.TempDir()
-	application.agyBrainRoot = brainRoot
-	application.transcriptWait = time.Second
-	tokens := []string{"refresh1", "switch1"}
-	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
-	application.getenv = cagyEnv(project, developer)
-	if err := application.ask(context.Background(), task); err != nil {
-		t.Fatal(err)
-	}
-	runner.assertDone()
-	if got := stdout.String(); got != "Finished after account switch.\n" {
-		t.Fatalf("stdout=%q", got)
-	}
-}
 func envGetter(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
 }
@@ -934,13 +843,12 @@ func TestDoctorChecksInstalledCapabilities(t *testing.T) {
 		{want: []string{"herdr", "pane"}, result: proc.Result{ExitCode: 2, Stderr: "pane split pane run pane close pane report-metadata"}},
 		{want: []string{"herdr", "pane", "report-metadata", "--help"}, result: textResult("--source --agent --display-agent --token")},
 		{want: []string{"herdr", "api", "schema", "--json"}, result: textResult("agent.view.set agent.view.clear")},
-		{want: []string{"agm", "help"}, result: textResult("refresh-all auto-switch")},
-		{want: []string{"agm", "auto-switch", "--help"}, result: textResult("--min")},
 		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
 		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}`)},
 	}}
 	var stdout strings.Builder
 	application := New(runner, &stdout, os.Stderr)
+	application.stateDir = t.TempDir()
 	application.getenv = envGetter(map[string]string{
 		"HERDR_ENV":          "1",
 		"HERDR_WORKSPACE_ID": "w1",
@@ -950,7 +858,7 @@ func TestDoctorChecksInstalledCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.assertDone()
-	if len(runner.lookups) != 4 {
+	if len(runner.lookups) != 3 {
 		t.Fatalf("lookups=%#v", runner.lookups)
 	}
 	if !strings.Contains(stdout.String(), "cagy is ready") {
@@ -967,13 +875,12 @@ func TestDoctorFailsWhenCodexLacksMCPSupport(t *testing.T) {
 		{want: []string{"herdr", "pane"}, result: proc.Result{ExitCode: 2, Stderr: "pane split pane run pane close pane report-metadata"}},
 		{want: []string{"herdr", "pane", "report-metadata", "--help"}, result: textResult("--source --agent --display-agent --token")},
 		{want: []string{"herdr", "api", "schema", "--json"}, result: textResult("agent.view.set agent.view.clear")},
-		{want: []string{"agm", "help"}, result: textResult("refresh-all auto-switch")},
-		{want: []string{"agm", "auto-switch", "--help"}, result: textResult("--min")},
 		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
 		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}`)},
 	}}
 	var stdout strings.Builder
 	application := New(runner, &stdout, os.Stderr)
+	application.stateDir = t.TempDir()
 	application.getenv = envGetter(map[string]string{
 		"HERDR_ENV":          "1",
 		"HERDR_WORKSPACE_ID": "w1",
@@ -1019,6 +926,40 @@ func TestStopClosesOnlyVerifiedDeveloperPane(t *testing.T) {
 	}
 }
 
+func TestStopAutomaticallySendsSecondInterruptWhenAgyNeedsIt(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "stopped")},
+		{want: []string{"herdr", "pane", "close", "w1:p2"}, result: jsonResult(`{"type":"pane_info"}`)},
+	}}
+	var stdout strings.Builder
+	app := New(runner, &stdout, &strings.Builder{})
+	app.agentStopEscalation = time.Millisecond
+	app.developerPoll = time.Second
+	app.getenv = envGetter(map[string]string{
+		"HERDR_ENV":               "1",
+		"HERDR_WORKSPACE_ID":      "w1",
+		"HERDR_PANE_ID":           "w1:p1",
+		"CAGY_SUPERVISOR_PANE_ID": "w1:p1",
+		"CAGY_DEVELOPER":          developer,
+		"CAGY_PROJECT_DIR":        project,
+	})
+	if err := app.stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner.assertDone()
+	if !strings.Contains(stdout.String(), "stopped the agy developer") {
+		t.Fatalf("stop output=%q", stdout.String())
+	}
+}
+
 func TestStopAbortsIfAgentReleaseTimesOut(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
@@ -1028,8 +969,11 @@ func TestStopAbortsIfAgentReleaseTimesOut(t *testing.T) {
 		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
 		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
 		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
 	}}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})
+	app.agentStopEscalation = 1 * time.Millisecond
 	app.agentStopTimeout = 1 * time.Millisecond
 	app.developerPoll = time.Second
 	app.getenv = envGetter(map[string]string{
@@ -1051,166 +995,6 @@ func TestStopAbortsIfAgentReleaseTimesOut(t *testing.T) {
 		}
 	}
 }
-func TestRecoveryStopsAfterTwoAttemptsAndKeepsOriginalDeveloper(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: "w1:p2", project: project}
-	agent := herdr.AgentInfo{Agent: "agy", AgentStatus: "done", PaneID: "w1:p2", WorkspaceID: "w1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
-	refreshMarker := "__CAGY_REFRESH_refresh1__"
-	firstMarker := "__CAGY_SWITCH_switch1__"
-	secondMarker := "__CAGY_SWITCH_switch2__"
-	steps := exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
-	steps = append(steps,
-		runStep{want: []string{"herdr", "pane", "run", "w1:p3", markedCommand("agm refresh-all", refreshMarker)}, result: jsonResult(`{"type":"pane_info"}`)},
-		runStep{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--regex", completionPattern(refreshMarker), "--source", "recent-unwrapped", "--lines", "400", "--timeout", "1800000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		runStep{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("Completed: 2 successful\n" + refreshMarker + ":0\n")},
-	)
-	steps = append(steps, failedAutoSwitchSteps("w1:p3", firstMarker)...)
-	steps = append(steps, runStep{want: []string{"herdr", "pane", "close", "w1:p3"}, result: jsonResult(`{"type":"pane_info"}`)})
-	steps = append(steps, exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)...)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p4", project, developer)...)
-	steps = append(steps, failedAutoSwitchSteps("w1:p4", secondMarker)...)
-
-	runner := &scriptedRunner{t: t, steps: steps}
-	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.stateDir = t.TempDir()
-	tokens := []string{"refresh1", "switch1", "switch2"}
-	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
-	_, _, err := application.recover(context.Background(), info, agent, "task", true)
-	if err == nil || !strings.Contains(err.Error(), "original developer was kept") {
-		t.Fatalf("error=%v", err)
-	}
-	runner.assertDone()
-	for _, call := range runner.calls {
-		joined := strings.Join(call, " ")
-		if strings.Contains(joined, "agent send-keys") || strings.Contains(joined, "agent start") || (strings.Contains(joined, "pane close") && strings.Contains(joined, "w1:p2")) {
-			t.Fatalf("original developer was mutated before a healthy replacement: %q", joined)
-		}
-	}
-}
-
-func TestAskPreflightQuotaRecoverySendsOriginalTask(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	task := "Implement the original task"
-	brainRoot := t.TempDir()
-	writeAgyTranscript(t, brainRoot, testConversationID, task, "Completed original task.")
-	marker := "__CAGY_SWITCH_switch1__"
-	steps := append(developerValidationSteps(developer, project),
-		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.03, 0.9)},
-	)
-	steps = append(steps, exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)...)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
-	steps = append(steps, successfulAutoSwitchSteps("w1:p3", marker)...)
-	steps = append(steps,
-		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
-	)
-	steps = append(steps, confirmedCloseSteps("w1:p3")...)
-	steps = append(steps, restartInPlaceSteps(developer, project, "w1:p2")...)
-	steps = append(steps,
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("resumed\n")},
-		runStep{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, before: func() { appendAgyTranscript(t, brainRoot, testConversationID, task, "Completed original task.") }, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("resumed\nCompleted original task.\n")},
-		runStep{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
-		sessionOwnershipStep("w1:p2", testConversationID),
-	)
-	runner := &scriptedRunner{t: t, steps: steps}
-	var stdout strings.Builder
-	application := New(runner, &stdout, &strings.Builder{})
-	application.stateDir = t.TempDir()
-	application.agyBrainRoot = brainRoot
-	application.transcriptWait = time.Second
-	application.now = func() time.Time { return time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC) }
-	if err := application.recordAGMRefresh(application.now().Add(-30 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	application.token = func() (string, error) { return "switch1", nil }
-	application.getenv = cagyEnv(project, developer)
-	if err := application.ask(context.Background(), task); err != nil {
-		t.Fatal(err)
-	}
-	runner.assertDone()
-	if got := stdout.String(); got != "Completed original task.\n" {
-		t.Fatalf("stdout=%q", got)
-	}
-}
-
-func TestRecoveryRejectsUnhealthyOrUnreadableSwitchedAccountsWithoutStoppingDeveloper(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: "w1:p2", project: project}
-	agent := herdr.AgentInfo{Agent: "agy", AgentStatus: "done", PaneID: "w1:p2", WorkspaceID: "w1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
-	firstMarker := "__CAGY_SWITCH_switch1__"
-	secondMarker := "__CAGY_SWITCH_switch2__"
-	steps := exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
-	steps = append(steps, successfulAutoSwitchSteps("w1:p3", firstMarker)...)
-	steps = append(steps,
-		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.03, 0.9)},
-		runStep{want: []string{"herdr", "pane", "close", "w1:p3"}, result: jsonResult(`{"type":"pane_info"}`)},
-	)
-	steps = append(steps, exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)...)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p4", project, developer)...)
-	steps = append(steps, successfulAutoSwitchSteps("w1:p4", secondMarker)...)
-	steps = append(steps, runStep{want: agyProbeArgs("/model"), result: textResult("not-json")})
-
-	runner := &scriptedRunner{t: t, steps: steps}
-	application := New(runner, &strings.Builder{}, &strings.Builder{})
-	application.stateDir = t.TempDir()
-	application.now = func() time.Time { return time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC) }
-	if err := application.recordAGMRefresh(application.now().Add(-30 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	tokens := []string{"switch1", "switch2"}
-	application.token = func() (string, error) { token := tokens[0]; tokens = tokens[1:]; return token, nil }
-	_, _, err := application.recover(context.Background(), info, agent, "task", true)
-	if err == nil || !strings.Contains(err.Error(), "verify switched agy account") {
-		t.Fatalf("error=%v", err)
-	}
-	runner.assertDone()
-	for _, call := range runner.calls {
-		joined := strings.Join(call, " ")
-		if strings.Contains(joined, "agent send-keys") || strings.Contains(joined, "agent start") {
-			t.Fatalf("developer changed before quota verification: %q", joined)
-		}
-	}
-}
-
-func recoveryAttemptStartSteps(paneID, project, developer string) []runStep {
-	return []runStep{
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON(paneID, "w1:t1", project, "", nil)},
-		{want: []string{"herdr", "pane", "rename", paneID, recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep(paneID, developer, "recovery"),
-	}
-}
-
-func successfulAutoSwitchSteps(paneID, marker string) []runStep {
-	confirmRegex := `Switch to this account\? \[y/N\]:|` + completionPattern(marker)
-	return []runStep{
-		{want: []string{"herdr", "pane", "run", paneID, markedCommand("agm auto-switch --min 5", marker)}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", paneID, "--regex", confirmRegex, "--source", "recent-unwrapped", "--lines", "400", "--timeout", "300000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", paneID, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("Best account: candidate@example.com\n" + agmConfirmation)},
-		{want: []string{"herdr", "pane", "send-text", paneID, "y"}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "send-keys", paneID, "enter"}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", paneID, "--regex", completionPattern(marker), "--source", "recent-unwrapped", "--lines", "400", "--timeout", "300000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", paneID, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("  ✓ Antigravity CLI (agy)\n" + marker + ":0\n")},
-	}
-}
-
-func failedAutoSwitchSteps(paneID, marker string) []runStep {
-	return []runStep{
-		{want: []string{"herdr", "pane", "run", paneID, markedCommand("agm auto-switch --min 5", marker)}, result: jsonResult(`{"type":"pane_info"}`)},
-		{want: []string{"herdr", "pane", "wait-output", paneID, "--regex", `Switch to this account\? \[y/N\]:|` + completionPattern(marker), "--source", "recent-unwrapped", "--lines", "400", "--timeout", "300000"}, result: jsonResult(`{"type":"output_matched"}`)},
-		{want: []string{"herdr", "pane", "read", paneID, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("no account available\n" + marker + ":1\n")},
-	}
-}
-
 func TestContextRejectsStaleDeveloperIdentity(t *testing.T) {
 	application := New(&fakeRunner{}, &strings.Builder{}, &strings.Builder{})
 	application.getenv = envGetter(map[string]string{
@@ -1226,7 +1010,7 @@ func TestContextRejectsStaleDeveloperIdentity(t *testing.T) {
 	}
 }
 
-func TestEnsureDeveloperRepairsOwnedRecoveryPane(t *testing.T) {
+func TestEnsureDeveloperRepairsOwnedRepairPane(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
 	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: "w1:p2", project: project}
@@ -1236,18 +1020,18 @@ func TestEnsureDeveloperRepairsOwnedRecoveryPane(t *testing.T) {
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
 			herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
-			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery", "cagy_session": testConversationID, agySessionStateToken: agySessionStateReady}},
+			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair", "cagy_session": testConversationID, agySessionStateToken: agySessionStateReady}},
 		)},
 		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "zsh")},
-		{want: []string{"herdr", "pane", "rename", "w1:p2", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p2", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p2", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p2", developer, "repair"),
 		{want: []string{"herdr", "pane", "rename", "w1:p2", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p2", "--timeout", "60000", "--", "--conversation", testConversationID, "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
+		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
+		{want: []string{"herdr", "pane", "wait-output", "w1:p2", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 		ownershipStep("w1:p2", developer, "developer"),
 		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
 		sessionOwnershipStep("w1:p2", testConversationID),
-		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p2", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 	}}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
 	got, err := application.ensureDeveloper(context.Background(), info)
@@ -1260,7 +1044,7 @@ func TestEnsureDeveloperRepairsOwnedRecoveryPane(t *testing.T) {
 	runner.assertDone()
 }
 
-func TestEnsureDeveloperRejectsMultipleOwnedRecoveryPanes(t *testing.T) {
+func TestEnsureDeveloperRejectsMultipleOwnedRepairPanes(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
 	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, project: project}
@@ -1269,8 +1053,8 @@ func TestEnsureDeveloperRejectsMultipleOwnedRecoveryPanes(t *testing.T) {
 		{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "missing")},
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
-			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery"}},
-			herdr.PaneInfo{PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery"}},
+			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair"}},
+			herdr.PaneInfo{PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair"}},
 		)},
 	}}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
@@ -1288,7 +1072,7 @@ func TestSessionHealthDetectsRepairableMissingDeveloper(t *testing.T) {
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 		{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "missing")},
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
-			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery"}},
+			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair"}},
 		)},
 		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "zsh")},
 	}}
@@ -1329,7 +1113,7 @@ func TestWaitAgentReleasedIsBounded(t *testing.T) {
 	}
 }
 
-func TestSessionHealthRejectsLeftoverOwnedRecoveryPane(t *testing.T) {
+func TestSessionHealthRejectsLeftoverOwnedRepairPane(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
 	runner := &scriptedRunner{t: t, steps: []runStep{
@@ -1338,13 +1122,13 @@ func TestSessionHealthRejectsLeftoverOwnedRecoveryPane(t *testing.T) {
 		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer", "cagy_session": testConversationID, agySessionStateToken: agySessionStateReady})},
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
 			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: developerPaneLabel, Agent: "agy"},
-			herdr.PaneInfo{PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery"}},
+			herdr.PaneInfo{PaneID: "w1:p3", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair"}},
 		)},
 	}}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
 	application.getenv = cagyEnv(project, developer)
 	err := application.checkSessionHealth(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "recovery pane w1:p3 remains") {
+	if err == nil || !strings.Contains(err.Error(), "repair pane w1:p3 remains") {
 		t.Fatalf("error=%v", err)
 	}
 	runner.assertDone()
@@ -1530,28 +1314,49 @@ func TestValidateShellPaneScenarios(t *testing.T) {
 	})
 }
 
+func TestCleanupFailedAgentStartStopsUnregisteredAgyAndReturnsPaneToShell(t *testing.T) {
+	developer := "developer"
+	info := runtimeContext{developer: developer}
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "not registered")},
+		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "agy", "node")},
+		{want: []string{"herdr", "pane", "send-keys", "w1:p2", "ctrl+c"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "agy", "node")},
+		{want: []string{"herdr", "pane", "send-keys", "w1:p2", "ctrl+c"}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "zsh")},
+	}}
+	app := New(runner, &strings.Builder{}, &strings.Builder{})
+	app.agentStopEscalation = time.Nanosecond
+	app.agentStopTimeout = time.Second
+	app.developerPoll = time.Second
+	if err := app.cleanupFailedAgentStart(context.Background(), info, "w1:p2"); err != nil {
+		t.Fatal(err)
+	}
+	runner.assertDone()
+}
+
 func TestRepairMissingDeveloperIgnoresUnownedLabelOnlyPane(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
 	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, project: project}
 	runner := &scriptedRunner{t: t, steps: []runStep{
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		// findRepairPane lists panes; w1:p2 has label "agy Recovery" but NO tokens -> must NOT be adopted!
+		// findRepairPane lists panes; w1:p2 has label "agy Repair" but NO tokens -> must NOT be adopted!
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
 			herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
-			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel},
+			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel},
 		)},
 		// Therefore SplitRight is called to create a new pane w1:p3!
 		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p3", "w1:t1", project, "", nil)},
-		{want: []string{"herdr", "pane", "rename", "w1:p3", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p3", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p3", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p3", developer, "repair"),
 		{want: []string{"herdr", "pane", "rename", "w1:p3", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p3", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: agentJSONWithSession("w1:p3", "w1", project, "idle", testConversationID)},
+		{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
+		{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 		ownershipStep("w1:p3", developer, "developer"),
 		{want: []string{"herdr", "pane", "report-metadata", "w1:p3", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
 		sessionOwnershipStep("w1:p3", testConversationID),
-		{want: []string{"herdr", "pane", "read", "w1:p3", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p3", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 	}}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})
 	got, err := app.repairMissingDeveloper(context.Background(), info)
@@ -1574,8 +1379,8 @@ func TestRepairMissingDeveloperAdoptsExistingOnAgentNameTaken(t *testing.T) {
 			herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
 		)},
 		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p3", "w1:t1", project, "", nil)},
-		{want: []string{"herdr", "pane", "rename", "w1:p3", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p3", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p3", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p3", developer, "repair"),
 		{want: []string{"herdr", "pane", "rename", "w1:p3", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 		// StartAgy returns agent_name_taken
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p3", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: jsonError("agent_name_taken", "agent name taken")},
@@ -1608,20 +1413,20 @@ func TestRepairMissingDeveloperRejectsInvalidExistingOnAgentNameTaken(t *testing
 			herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
 		)},
 		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p3", "w1:t1", project, "", nil)},
-		{want: []string{"herdr", "pane", "rename", "w1:p3", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p3", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p3", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p3", developer, "repair"),
 		{want: []string{"herdr", "pane", "rename", "w1:p3", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 		// StartAgy returns agent_name_taken
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p3", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: jsonError("agent_name_taken", "agent name taken")},
 		// Existing agent belongs to another tab!
 		{want: []string{"herdr", "agent", "get", developer}, result: jsonResult(`{"type":"agent_info","agent":{"agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:other_tab","foreground_cwd":"` + project + `"}}`)},
 		// Mark pane w1:p3 as recovery and leave visible
-		{want: []string{"herdr", "pane", "rename", "w1:p3", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p3", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p3", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p3", developer, "repair"),
 	}}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})
 	_, err := app.repairMissingDeveloper(context.Background(), info)
-	if err == nil || !strings.Contains(err.Error(), "agent_name_taken") || !strings.Contains(err.Error(), "recovery pane left visible") {
+	if err == nil || !strings.Contains(err.Error(), "agent_name_taken") || !strings.Contains(err.Error(), "repair pane left visible") {
 		t.Fatalf("error=%v", err)
 	}
 	runner.assertDone()
@@ -1632,31 +1437,28 @@ func TestRollbackStartedAgentOnPostStartFailure(t *testing.T) {
 	developer := developerName("w1", "w1:p1")
 	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, project: project}
 
-	t.Run("readiness failure stops agent and leaves recovery pane", func(t *testing.T) {
+	t.Run("readiness failure stops agent and leaves repair pane", func(t *testing.T) {
 		runner := &scriptedRunner{t: t, steps: []runStep{
 			{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 			{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
 				herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
 			)},
 			{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p2", "w1:t1", project, "", nil)},
-			{want: []string{"herdr", "pane", "rename", "w1:p2", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-			ownershipStep("w1:p2", developer, "recovery"),
+			{want: []string{"herdr", "pane", "rename", "w1:p2", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+			ownershipStep("w1:p2", developer, "repair"),
 			{want: []string{"herdr", "pane", "rename", "w1:p2", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 			{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p2", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
-			ownershipStep("w1:p2", developer, "developer"),
-			{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
-			sessionOwnershipStep("w1:p2", testConversationID),
-			// readiness check fails:
+			// readiness check fails while the bound account is still canonical:
 			{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: jsonError("read_error", "unreadable pane")},
 			// rollback:
 			{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
 			{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "stopped")},
-			{want: []string{"herdr", "pane", "rename", "w1:p2", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-			ownershipStep("w1:p2", developer, "recovery"),
+			{want: []string{"herdr", "pane", "rename", "w1:p2", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+			ownershipStep("w1:p2", developer, "repair"),
 		}}
 		app := New(runner, &strings.Builder{}, &strings.Builder{})
 		_, err := app.repairMissingDeveloper(context.Background(), info)
-		if err == nil || !strings.Contains(err.Error(), "read agy startup") || !strings.Contains(err.Error(), "recovery pane left visible") {
+		if err == nil || !strings.Contains(err.Error(), "read agy startup") || !strings.Contains(err.Error(), "repair pane left visible") {
 			t.Fatalf("error=%v", err)
 		}
 		runner.assertDone()
@@ -1867,72 +1669,6 @@ func TestExactAgySessionIDRejectsUntrustedIdentity(t *testing.T) {
 	}
 }
 
-func TestRecoveryFailsBeforeAGMMutationWhenExactSessionIsUnsafe(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: "w1:p2", project: project}
-	expected := herdr.AgentInfo{
-		Agent:         "agy",
-		PaneID:        "w1:p2",
-		WorkspaceID:   "w1",
-		TabID:         "w1:t1",
-		ForegroundCWD: project,
-		AgentSession:  &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID},
-	}
-	otherConversationID := "11111111-1111-1111-1111-111111111111"
-	tests := []struct {
-		name       string
-		liveResult proc.Result
-		want       string
-	}{
-		{name: "missing live identity", liveResult: agentJSON("w1:p2", "w1", project, "idle"), want: "identity is missing"},
-		{name: "invalid live source", liveResult: jsonResult(`{"type":"agent_info","agent":{"agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","foreground_cwd":"` + project + `","agent_session":{"source":"other","agent":"agy","kind":"id","value":"` + testConversationID + `"}}}`), want: "source is unsupported"},
-		{name: "changed live identity", liveResult: agentJSONWithSession("w1:p2", "w1", project, "idle", otherConversationID), want: "conversation changed before recovery"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runner := &scriptedRunner{t: t, steps: []runStep{
-				{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-				{want: []string{"herdr", "agent", "get", developer}, result: test.liveResult},
-				{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
-			}}
-			app := New(runner, &strings.Builder{}, &strings.Builder{})
-			_, _, err := app.recover(context.Background(), info, expected, "task", true)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error=%v", err)
-			}
-			runner.assertDone()
-			for _, call := range runner.calls {
-				joined := strings.Join(call, " ")
-				if strings.Contains(joined, "agm ") || strings.Contains(joined, "pane split") || strings.Contains(joined, "agent send-keys") {
-					t.Fatalf("unsafe recovery mutated external state: %q", joined)
-				}
-			}
-		})
-	}
-}
-
-func TestRecoveryRequiresSessionMetadataBeforeAGMMutation(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: "w1:p2", project: project}
-	agent := herdr.AgentInfo{Agent: "agy", PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
-	steps := exactSessionCaptureSteps(developer, project, "w1:p2", testConversationID)
-	steps[len(steps)-1].result = jsonError("metadata_error", "metadata unavailable")
-	runner := &scriptedRunner{t: t, steps: steps}
-	app := New(runner, &strings.Builder{}, &strings.Builder{})
-	_, _, err := app.recover(context.Background(), info, agent, "task", true)
-	if err == nil || !strings.Contains(err.Error(), "save agy conversation before quota recovery") {
-		t.Fatalf("error=%v", err)
-	}
-	runner.assertDone()
-	for _, call := range runner.calls {
-		if strings.Contains(strings.Join(call, " "), "pane split") {
-			t.Fatalf("recovery pane was created before session metadata was safe: %v", call)
-		}
-	}
-}
-
 func TestAskWarnsButReturnsCompletedOutputWhenSessionMetadataFails(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
@@ -1946,7 +1682,7 @@ func TestAskWarnsButReturnsCompletedOutputWhenSessionMetadataFails(t *testing.T)
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\n")},
-		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old output\nImplemented.\n")},
 		{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
@@ -1995,7 +1731,7 @@ func TestRepairMissingDeveloperRejectsOwnedPaneWithoutSavedSession(t *testing.T)
 	runner := &scriptedRunner{t: t, steps: []runStep{
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 		{want: []string{"herdr", "pane", "list", "--workspace", "w1"}, result: paneListJSON(
-			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: recoveryPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "recovery"}},
+			herdr.PaneInfo{PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: repairPaneLabel, Tokens: map[string]string{"cagy_owner": developer, "cagy_role": "repair"}},
 		)},
 		{want: []string{"herdr", "pane", "process-info", "--pane", "w1:p2"}, result: paneProcessJSON("w1:p2", "zsh")},
 	}}
@@ -2022,15 +1758,15 @@ func TestFreshReplacementAllowsSessionIdentityToAppearAfterFirstTask(t *testing.
 			herdr.PaneInfo{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", CWD: project, Label: "Codex Supervisor", Agent: "codex"},
 		)},
 		{want: []string{"herdr", "pane", "split", "--current", "--direction", "right", "--cwd", project, "--no-focus"}, result: paneJSON("w1:p2", "w1:t1", project, "", nil)},
-		{want: []string{"herdr", "pane", "rename", "w1:p2", recoveryPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
-		ownershipStep("w1:p2", developer, "recovery"),
+		{want: []string{"herdr", "pane", "rename", "w1:p2", repairPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep("w1:p2", developer, "repair"),
 		{want: []string{"herdr", "pane", "rename", "w1:p2", developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
 		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", "w1:p2", "--timeout", "60000", "--", "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
+		{want: []string{"herdr", "pane", "wait-output", "w1:p2", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 		ownershipStep("w1:p2", developer, "developer"),
 		{want: []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
 		pendingSessionStep("w1:p2"),
-		{want: []string{"herdr", "pane", "read", "w1:p2", "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
-		{want: []string{"herdr", "pane", "wait-output", "w1:p2", "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
 	}}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})
 	got, err := app.repairMissingDeveloper(context.Background(), info)
@@ -2080,64 +1816,6 @@ func TestRestartRefusesToStopDeveloperIfConversationChangedAfterAccountSwitch(t 
 	}
 }
 
-func TestAskPreflightQuotaRecoveryRestartsFreshUnreportedSession(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	task := "Implement the first task"
-	brainRoot := t.TempDir()
-	marker := "__CAGY_SWITCH_switch1__"
-	steps := []runStep{
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
-		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer", agySessionStateToken: agySessionStatePending})},
-		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.03, 0.9)},
-	}
-	steps = append(steps, pendingSessionCaptureSteps(developer, project, "w1:p2")...)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
-	steps = append(steps, successfulAutoSwitchSteps("w1:p3", marker)...)
-	steps = append(steps,
-		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
-	)
-	steps = append(steps, confirmedCloseSteps("w1:p3")...)
-	steps = append(steps, restartFreshInPlaceSteps(developer, project, "w1:p2")...)
-	steps = append(steps,
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\n")},
-		runStep{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, before: func() {
-			writeAgyTranscript(t, brainRoot, testConversationID, task, "Completed first task.")
-		}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\nCompleted first task.\n")},
-		runStep{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
-		sessionOwnershipStep("w1:p2", testConversationID),
-	)
-	runner := &scriptedRunner{t: t, steps: steps}
-	var stdout strings.Builder
-	app := New(runner, &stdout, &strings.Builder{})
-	app.stateDir = t.TempDir()
-	app.agyBrainRoot = brainRoot
-	app.transcriptWait = time.Second
-	app.now = func() time.Time { return time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC) }
-	if err := app.recordAGMRefresh(app.now().Add(-30 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	app.token = func() (string, error) { return "switch1", nil }
-	app.getenv = cagyEnv(project, developer)
-	if err := app.ask(context.Background(), task); err != nil {
-		t.Fatal(err)
-	}
-	runner.assertDone()
-	if stdout.String() != "Completed first task.\n" {
-		t.Fatalf("stdout=%q", stdout.String())
-	}
-	for _, call := range runner.calls {
-		if contains(call, "--continue") {
-			t.Fatalf("ambiguous resume was used: %v", call)
-		}
-	}
-}
-
 func TestSessionHealthAcceptsVerifiedFreshPendingConversation(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
@@ -2157,99 +1835,92 @@ func TestSessionHealthAcceptsVerifiedFreshPendingConversation(t *testing.T) {
 	runner.assertDone()
 }
 
-func TestDelegateTaskPreservesResumedSessionIdentityAfterQuotaRecovery(t *testing.T) {
-	project, _ := filepath.EvalSymlinks(t.TempDir())
-	developer := developerName("w1", "w1:p1")
-	task := "Implement the first task with recovery"
-	brainRoot := t.TempDir()
-	marker := "__CAGY_SWITCH_switch1__"
-	steps := []runStep{
-		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
-		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer", agySessionStateToken: agySessionStatePending})},
-		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.03, 0.9)},
-	}
-	steps = append(steps, pendingSessionCaptureSteps(developer, project, "w1:p2")...)
-	steps = append(steps, recoveryAttemptStartSteps("w1:p3", project, developer)...)
-	steps = append(steps, successfulAutoSwitchSteps("w1:p3", marker)...)
-	steps = append(steps,
-		runStep{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
-		runStep{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
-	)
-	steps = append(steps, confirmedCloseSteps("w1:p3")...)
-	steps = append(steps, restartFreshInPlaceSteps(developer, project, "w1:p2")...)
-	steps = append(steps,
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\n")},
-		runStep{want: []string{"herdr", "agent", "prompt", developer, task, "--wait", "--timeout", "300000"}, before: func() {
-			writeAgyTranscript(t, brainRoot, testConversationID, task, "Completed first task after recovery.")
-		}, result: agentJSONWithSession("w1:p2", "w1", project, "done", testConversationID)},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("fresh\nCompleted first task after recovery.\n")},
-		runStep{want: []string{"herdr", "agent", "wait", developer, "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
-		runStep{want: []string{"herdr", "agent", "read", developer, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
-		sessionOwnershipStep("w1:p2", testConversationID),
-		// Steps for inspectTaskJournal during recoverTask
-		runStep{want: []string{"herdr", "agent", "get", developer}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
-		runStep{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
-		runStep{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
-	)
-
-	runner := &scriptedRunner{t: t, steps: steps}
+func TestDoctorChecksNativeAccountStateWhenCatalogExists(t *testing.T) {
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"codex", "--yolo", "--help"}, result: proc.Result{ExitCode: 0}},
+		{want: []string{"codex", "mcp", "--help"}, result: textResult("Commands:\n  list\n")},
+		{want: []string{"agy", "--help"}, result: textResult("--dangerously-skip-permissions --mode accept-edits --conversation --print --output-format --print-timeout")},
+		{want: []string{"herdr", "agent"}, result: proc.Result{ExitCode: 2, Stderr: "agent start agent prompt agent wait kinds: agy"}},
+		{want: []string{"herdr", "pane"}, result: proc.Result{ExitCode: 2, Stderr: "pane split pane run pane close pane report-metadata"}},
+		{want: []string{"herdr", "pane", "report-metadata", "--help"}, result: textResult("--source --agent --display-agent --token")},
+		{want: []string{"herdr", "api", "schema", "--json"}, result: textResult("agent.view.set agent.view.clear")},
+		{want: []string{"herdr", "integration", "status"}, result: textResult("antigravity-cli: current (v3) (/tmp/hook)\n")},
+		{want: []string{"herdr", "pane", "current", "--current"}, result: jsonResult(`{"type":"pane_current","pane":{"pane_id":"w1:p1","workspace_id":"w1"}}`)},
+	}}
+	service, _, _, _, _, _ := accountCommandService(t)
 	var stdout strings.Builder
-	app := New(runner, &stdout, &strings.Builder{})
-	app.stateDir = t.TempDir()
-	app.agyBrainRoot = brainRoot
-	app.transcriptWait = time.Second
-	app.now = func() time.Time { return time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC) }
-	if err := app.recordAGMRefresh(app.now().Add(-30 * time.Minute)); err != nil {
+	application := New(runner, &stdout, os.Stderr)
+	application.stateDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(application.stateDir, "accounts.json"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	app.token = func() (string, error) { return "switch1", nil }
-	app.getenv = cagyEnv(project, developer)
-
-	delivery, err := app.delegateTask(context.Background(), task)
-	if err != nil {
-		t.Fatalf("delegateTask failed: %v", err)
+	application.accountsFactory = func() (*accounts.AccountService, error) { return service, nil }
+	application.getenv = envGetter(map[string]string{
+		"HERDR_ENV":          "1",
+		"HERDR_WORKSPACE_ID": "w1",
+		"HERDR_PANE_ID":      "w1:p1",
+	})
+	if err := application.doctor(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if delivery.output != "Completed first task after recovery." {
-		t.Fatalf("unexpected delivery output: %q", delivery.output)
+	if !strings.Contains(stdout.String(), "native agy account state") || !strings.Contains(stdout.String(), "cagy is ready") {
+		t.Fatalf("output=%q", stdout.String())
 	}
-
-	// Verify journal on disk has the RESUMED session, NOT the initial empty one!
-	record, exists, err := app.loadTaskJournal(developer)
-	if err != nil || !exists {
-		t.Fatalf("journal should exist on disk, exists=%v, err=%v", exists, err)
-	}
-	if record.SessionID != testConversationID {
-		t.Fatalf("journal SessionID = %q, want resumed session %q (was overwritten by pre-recovery agent!)", record.SessionID, testConversationID)
-	}
-	if record.Phase != taskPhaseCompleted {
-		t.Fatalf("journal Phase = %q, want %q", record.Phase, taskPhaseCompleted)
-	}
-	if record.DeliveryReceipt == "" || !isValidDeliveryReceipt(record.DeliveryReceipt) {
-		t.Fatalf("expected valid delivery receipt in journal, got: %q", record.DeliveryReceipt)
-	}
-
-	// Verify recoverTask succeeds using the journal and matches the answer and receipt
-	app.activeTask = nil
-	recOut, err := app.recoverTask(context.Background())
-	if err != nil {
-		t.Fatalf("recoverTask failed: %v", err)
-	}
-	if recOut.Answer != "Completed first task after recovery." {
-		t.Fatalf("recoverTask Answer = %q, want %q", recOut.Answer, "Completed first task after recovery.")
-	}
-	if recOut.Receipt != record.DeliveryReceipt {
-		t.Fatalf("recoverTask Receipt = %q, want journal receipt %q", recOut.Receipt, record.DeliveryReceipt)
-	}
-
-	// Verify acknowledgeTask clears the journal
-	if err := app.acknowledgeTask(context.Background(), recOut.Receipt); err != nil {
-		t.Fatalf("acknowledgeTask failed: %v", err)
-	}
-	if _, exists, _ := app.loadTaskJournal(developer); exists {
-		t.Fatal("journal should be deleted after acknowledgeTask")
-	}
-
 	runner.assertDone()
+}
+
+func TestStartDeveloperInPlaceResumesExactSessionWithoutStoppingAgain(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	paneID := "w1:p2"
+	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: paneID, project: project}
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "pane", "get", paneID}, result: paneJSON(paneID, "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer", "cagy_session": testConversationID, agySessionStateToken: agySessionStateReady})},
+		{want: []string{"herdr", "pane", "process-info", "--pane", paneID}, result: paneProcessJSON(paneID, "zsh")},
+		ownershipStep(paneID, developer, "developer"),
+		{want: []string{"herdr", "pane", "report-metadata", paneID, "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+		{want: []string{"herdr", "agent", "start", developer, "--kind", "agy", "--pane", paneID, "--timeout", "60000", "--", "--conversation", testConversationID, "--dangerously-skip-permissions", "--mode", "accept-edits"}, result: agentJSONWithSession(paneID, "w1", project, "idle", testConversationID)},
+		{want: []string{"herdr", "pane", "rename", paneID, developerPaneLabel}, result: jsonResult(`{"type":"pane_info"}`)},
+		ownershipStep(paneID, developer, "developer"),
+		{want: []string{"herdr", "pane", "report-metadata", paneID, "--source", developerDisplaySource, "--agent", "agy", "--display-agent", developerDisplayName}, result: jsonResult(`{"type":"ok"}`)},
+		sessionOwnershipStep(paneID, testConversationID),
+		{want: []string{"herdr", "pane", "read", paneID, "--source", "recent-unwrapped", "--lines", "200"}, result: textResult("? for shortcuts\n")},
+		{want: []string{"herdr", "pane", "wait-output", paneID, "--match", "? for shortcuts", "--source", "recent-unwrapped", "--lines", "400", "--timeout", "60000"}, result: jsonResult(`{"type":"output_matched"}`)},
+	}}
+	application := New(runner, &strings.Builder{}, &strings.Builder{})
+	got, err := application.startDeveloperInPlace(context.Background(), info, paneID, testConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PaneID != paneID || got.AgentSession == nil || got.AgentSession.Value != testConversationID {
+		t.Fatalf("developer=%+v", got)
+	}
+	runner.assertDone()
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "agent send-keys") {
+			t.Fatalf("already-stopped recovery pane was interrupted again: %v", call)
+		}
+	}
+}
+
+func TestStartDeveloperInPlaceRejectsOccupiedPaneBeforeStarting(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	paneID := "w1:p2"
+	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: developer, developerPane: paneID, project: project}
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "pane", "get", paneID}, result: jsonResult(`{"type":"pane_info","pane":{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":"` + project + `","agent":"other"}}`)},
+	}}
+	application := New(runner, &strings.Builder{}, &strings.Builder{})
+	_, err := application.startDeveloperInPlace(context.Background(), info, paneID, testConversationID)
+	if err == nil || !strings.Contains(err.Error(), "not an available shell") {
+		t.Fatalf("error=%v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "agent start") {
+			t.Fatalf("occupied pane was used: %v", call)
+		}
+	}
 }

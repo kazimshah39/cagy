@@ -12,4 +12,4 @@ If private vulnerability reporting is unavailable, open a minimal public issue a
 
 ## Sensitive data
 
-cagy must never log or store OAuth tokens, refresh tokens, API keys, Keychain contents, AGM database contents, complete environment dumps, or full private agent transcripts.
+cagy must never log or expose OAuth tokens, refresh tokens, API keys, Keychain contents, complete environment dumps, account-backup passphrases, or full private agent transcripts. For this personal-Mac, simplicity-first setup, cagy account snapshots are stored as private `0600` files inside cagy's `0700` state directory so normal startup never requires Keychain approval. agy continues to own its canonical `gemini` Keychain session, and cagy never rewrites that item's access permissions. Account catalog metadata, diagnostics, and encrypted exports must never expose tokens. Do not use this convenience design on a shared or high-security Mac.

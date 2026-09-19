@@ -30,7 +30,8 @@ curl -fsSL https://raw.githubusercontent.com/kazimshah39/cagy/main/install.sh | 
 ```
 
 The installer:
-- uses your local Go toolchain (Go 1.25+) to build a clean binary;
+
+- supports only Apple Silicon macOS (`darwin/arm64`);
 - installs to `~/.local/bin` without requiring `sudo` or root permissions;
 - also supports downloading prebuilt release binaries (`--binary`) with SHA-256 checksum verification if published.
 
@@ -64,35 +65,36 @@ You can also install directly via the Go CLI:
 go install -trimpath github.com/kazimshah39/cagy/cmd/cagy@latest
 ```
 
-### Supported Platforms
+### Supported Platform
 
-| Operating System | Architecture | Target |
-| :--- | :--- | :--- |
-| **macOS** | Apple Silicon (`arm64`) | Supported |
-| **macOS** | Intel (`amd64`) | Supported |
-| **Linux** | 64-bit ARM (`arm64` / `aarch64`) | Supported |
-| **Linux** | 64-bit x86 (`amd64` / `x86_64`) | Supported |
+| Operating System | Architecture            | Target    |
+| :--------------- | :---------------------- | :-------- |
+| **macOS**        | Apple Silicon (`arm64`) | Supported |
 
 ### PATH Configuration
 
 If `~/.local/bin` is not yet in your shell's `PATH`, add it to your profile:
 
 **For Zsh** (`~/.zshrc`, default on macOS):
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 **For Bash** (`~/.bashrc` or `~/.bash_profile`):
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Then reload your shell:
+
 ```bash
 source ~/.zshrc   # or source ~/.bashrc
 ```
 
 Verify the installation:
+
 ```bash
 cagy --help
 ```
@@ -126,10 +128,9 @@ rm -f "$HOME/.local/bin/cagy"
 - Herdr
 - Codex CLI
 - agy CLI
-- [agm](https://github.com/shyim/agm)
-- Go 1.25+ (required for source compilation and building; prebuilt binaries are self-contained)
+- Go 1.25+ (required for source compilation and building)
 
-AGM stays an unchanged external dependency. cagy also needs Herdr's official agy integration so complete answers can be read from agy's transcript:
+cagy stores imported agy account snapshots as private local files. Normal startup, repair, quota monitoring, and `cagy accounts doctor` do not touch agy's canonical `gemini` Keychain item. When quota is confirmed low or exhausted during delegated work, cagy automatically replaces the canonical item through its non-interactive delete-and-add flow, restarts agy in the same verified pane, live-checks the next stored account, and continues the task. This flow does not ask for the macOS login password and never opens Google automatically. Browser login is started only by the explicit `cagy accounts add` command. The legacy external account manager is not required, installed, or used. cagy also needs Herdr's official agy integration so complete answers can be read from agy's transcript:
 
 ```bash
 herdr integration install antigravity-cli
@@ -214,9 +215,36 @@ Other commands:
 ```bash
 cagy doctor
 cagy stop
+
+# Native agy account manager (simple private local credential snapshots)
+cagy accounts add
+cagy accounts import-active
+cagy accounts list
+cagy accounts status [ACCOUNT]
+cagy accounts switch ACCOUNT
+cagy accounts remove ACCOUNT --yes
+cagy accounts doctor
+cagy accounts export --output FILE
+cagy accounts export --metadata-only --output FILE
+cagy accounts import FILE
 ```
 
-Before each delegated task, cagy checks agy's real `/model` and `/quota` status. While a task is running, it checks again after each five-minute wait segment if agy appears stuck. The task is submitted only once. A transient Herdr `idle` or `done` state does not finish the task.
+Encrypted exports require an interactive passphrase and never activate an account automatically. Metadata-only exports contain full account labels and email addresses, but no credentials or OAuth tokens. `accounts doctor` reports incomplete transactions or missing local credential snapshots without changing Keychain state. When an account catalog exists, the main `cagy doctor` also checks native account health. A global lock prevents concurrent account changes.
+
+`cagy accounts add` runs its own loopback OAuth callback with PKCE, opens Google only because the user explicitly requested login, verifies the returned Google identity, and stores the agy-compatible credential only in cagy's private local vault. It never reads or changes the existing `gemini` Keychain item, and it does not change agy's currently active login. Normal Google consent or MFA may still appear in the browser.
+
+CAGY does not commit Google OAuth client credentials in source control. Before using `cagy accounts add`, or before refreshing an account after its access token expires, configure the same OAuth client locally in your shell:
+
+```bash
+export CAGY_GOOGLE_CLIENT_ID="your-google-oauth-client-id"
+export CAGY_GOOGLE_CLIENT_SECRET="your-google-oauth-client-secret"
+```
+
+Keep those values in your local shell configuration only; never commit them to this repository. Imported accounts can still be listed and inspected without opening OAuth.
+
+`cagy accounts switch ACCOUNT` does not run agy and does not open OAuth. It refreshes the selected stored credential directly with Google, verifies the account identity, and then replaces agy's canonical Keychain item using the same delete-and-add, allow-all flow as AGM. This avoids legacy ACL password prompts. Restart the active agy/cagy session after switching so the new process reads the selected account.
+
+Before each delegated task, cagy checks agy's real `/model` and `/quota` status. During a task it polls visible state every second, probes agy's current session every 45 seconds, and treats 150 seconds without meaningful progress as a healthy-stall candidate. Five-minute messages are only user-facing heartbeats; the overall task deadline is 30 minutes. If quota is low, cagy automatically rotates through eligible stored accounts. Before work starts, the original task is submitted exactly once after a healthy account is active. After work starts, cagy resumes the exact conversation and sends only a generic continuation instruction, never the original prompt again. A transient Herdr `idle` or `done` state does not finish the task.
 
 Herdr's pane remains the visible status and progress view. cagy waits for agy's real footer to stay idle, treats `esc to cancel` and a non-zero `task(s)` count as still working, and watches separately for a blocked state. It also follows transcript background-task lifecycle events, so a temporary idle footer and an intermediate “still waiting” message cannot be mistaken for the final answer. It then reads the exact task's final answer from agy's JSONL transcript instead of terminal scrollback. `transcript_full.jsonl` is preferred so long answers are not cut off; the compact transcript is used only when the full file does not exist. Intermediate progress messages, tool output, model reasoning, system messages, old turns, and blocked-screen scrollback are never returned as the answer. If the transcript integration is missing or the final record is incomplete, cagy stops with a clear error instead of silently returning a partial answer.
 
@@ -240,18 +268,29 @@ cagy ask --forget
 
 `--forget` refuses while the developer is still visibly working. A crashed caller's lock is reclaimed only after its recorded process is confirmed dead; a live lock remains exclusive.
 
-When the active model's weekly quota is 3% or less, or the 5-hour quota is 2% or less, cagy visibly runs:
+cagy classifies the active agy session's quota as available, low, exhausted, or unknown. Unknown or malformed results never trigger switching. When quota is confirmed low or exhausted, cagy automatically tries each eligible stored account at most once. Fresh known-good accounts are preferred; stale or unknown accounts are refreshed, identity-validated, started, and live-probed before use. Fresh low/exhausted, disabled, needs-login, missing-credential, current, cooling-down, and already-attempted accounts are skipped. A successful account becomes the active default and is bound to the visible developer pane. If every reusable account is unavailable, cagy restores the original visible developer when safe and prints one clear instruction to add or refresh an account. It never opens OAuth automatically.
 
-```bash
-agm refresh-all
-agm auto-switch --min 5
+## Diagnostic logs
+
+During the current local reliability-testing period, detailed diagnostics are enabled by default for real cagy processes. The active log is:
+
+```text
+~/Library/Application Support/cagy/state/logs/cagy.log
 ```
 
-`agm refresh-all` runs only when recovery is needed and at most once per hour, so it never runs from an idle timer. Partial refresh failures are allowed only when at least one account refreshed successfully. The existing developer stays running while cagy evaluates replacement accounts. After a switch, cagy checks the new account's real quota before touching agy. Recovery pane closure must be confirmed with retries; the developer is never stopped if closure cannot be confirmed. Once confirmed, cagy stops agy, waits for name release, and restarts agy with the exact saved conversation ID in the same developer pane. If post-start validation, metadata reporting, or prompt readiness fails, cagy stops the started agent, waits for name release, leaves a clean owned recovery shell, and reports both original and cleanup errors. Recovery stops after two failed account attempts. If quota data cannot be read, cagy does not switch blindly or remove the developer.
+Each line includes a UTC timestamp, process ID, source file/line, lifecycle event, and safe metadata. cagy logs startup, Herdr pane/agent operations, account binding and switching, quota probes, MCP tool calls, task-journal phases, recovery, acknowledgements, retries, timeouts, and failures. It records task byte counts and short SHA-256 fingerprints instead of task text. It never intentionally records credentials, authorization codes, bearer tokens, passwords, receipts, complete transcripts, or model answers.
 
-cagy stores non-secret ownership metadata (`cagy_owner` and `cagy_role`) on its panes, the exact agy conversation ID as `cagy_session`, and a `cagy_session_state` marker on the developer pane. A brand-new agy process is marked `pending` until its first prompt lets Herdr report the conversation; completed tasks store the exact ID and mark it `ready`. If the named developer is unexpectedly missing, the next `cagy ask` safely repairs one matching pane or creates a replacement. Owned metadata is strictly required; user-editable labels are never trusted. Inactive panes reused for repair must be verified as interactive shells via Herdr `pane process-info`. It never adopts ambiguous, cross-workspace, cross-tab, cross-project, unreadable, non-shell, or active-agent panes. Unknown working directories fail closed. If a newly created repair pane encounters `agent_name_taken` while the existing developer is valid, the extra pane is automatically closed. `cagy stop` validates ownership and scope before sending Ctrl+C, and never closes the pane if stopping fails.
+Logs are private (`0600`) inside a private directory (`0700`). The active file rotates at 8 MiB and keeps at most five backups (`cagy.log.1` through `cagy.log.5`). To temporarily disable diagnostics for one run:
 
-When run inside a cagy supervisor, `cagy doctor` also checks the live named developer, accepts only a verified fresh `pending` state or a `ready` `cagy_session` that matches Herdr's live conversation ID, and reports abandoned recovery panes. A new agy session does not report its ID until its first prompt. cagy can still perform preflight quota recovery while that verified fresh session is `pending`; it restarts fresh rather than guessing another conversation. After the task completes, cagy saves the reported exact ID automatically. This prevents a dependency-only false green result while delegation or exact recovery is broken.
+```bash
+CAGY_DIAGNOSTICS=0 cagy
+```
+
+When reporting a problem, keep the terminal error and the matching time. That is enough to locate the relevant events in the diagnostic log without reproducing the whole workflow.
+
+cagy stores non-secret ownership metadata (`cagy_owner` and `cagy_role`) on its panes, the exact agy conversation ID as `cagy_session`, and a `cagy_session_state` marker on the developer pane. A brand-new agy process is marked `pending` until its first prompt lets Herdr report the conversation; completed tasks store the exact ID and mark it `ready`. If the named developer is unexpectedly missing, the next `cagy ask` safely repairs one matching pane or creates a replacement. Owned metadata is strictly required; user-editable labels are never trusted. Inactive panes reused for repair must be verified as interactive shells via Herdr `pane process-info`. It never adopts ambiguous, cross-workspace, cross-tab, cross-project, unreadable, non-shell, or active-agent panes. Unknown working directories fail closed. If a newly created repair pane encounters `agent_name_taken` while the existing developer is valid, the extra pane is automatically closed. `cagy stop` validates ownership and scope, sends Ctrl+C, and automatically sends a second Ctrl+C after a short grace period when agy remains open (agy commonly uses the first press to cancel and the second to exit). It waits for confirmed agent release and never closes the pane if stopping still fails.
+
+When run inside a cagy supervisor, `cagy doctor` also checks the live named developer, accepts only a verified fresh `pending` state or a `ready` `cagy_session` that matches Herdr's live conversation ID, and reports abandoned recovery panes. A new agy session does not report its ID until its first prompt. If preflight quota is low while that verified fresh session is still `pending`, cagy may switch accounts and start another fresh session because no task has begun. Once work starts, automatic recovery requires and resumes the exact reported conversation ID. After task completion, cagy saves that ID automatically. This prevents a dependency-only false green result while keeping first-task recovery automatic.
 
 cagy ignores quota-error examples inside the echoed task text. It only treats new developer output as the signal. Recovery command completion also requires a numeric marker, so Herdr's echoed shell command cannot finish a wait early.
 
@@ -263,23 +302,25 @@ cagy ignores quota-error examples inside the echoed task text. It only treats ne
 
 Releases can be generated and published locally without automated CI:
 
-1. **Build cross-platform release packages and checksums**:
+1. **Build the Apple Silicon macOS release package and checksum**:
+
    ```bash
    make release-build
    ```
-   This generates `dist/cagy_<version>_<os>_<arch>.tar.gz` for macOS and Linux (`amd64` and `arm64`) along with `dist/checksums.txt`.
+
+   This generates `dist/cagy_<version>_darwin_arm64.tar.gz` and `dist/checksums.txt`. Releases intentionally contain only the `darwin/arm64` cgo build.
 
 2. **Publish on GitHub**:
    Use GitHub CLI or the GitHub Releases web interface to upload the assets:
+
    ```bash
    gh release create v0.1.0 --title "cagy v0.1.0" --notes "Release v0.1.0" dist/*.tar.gz dist/checksums.txt
    ```
 
 3. **Verify Checksums Manually**:
+
    ```bash
    # On macOS:
    shasum -a 256 -c checksums.txt --ignore-missing
 
-   # On Linux:
-   sha256sum -c checksums.txt --ignore-missing
    ```

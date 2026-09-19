@@ -253,7 +253,7 @@ func TestPromptTransportFailureKeepsDurableUncertainState(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developerName, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
-		{want: []string{"herdr", "agent", "prompt", developerName, task, "--wait", "--timeout", "300000"}, result: jsonError("transport_closed", "caller disappeared")},
+		{want: []string{"herdr", "agent", "prompt", developerName, task, "--wait", "--timeout", "30000"}, result: jsonError("transport_closed", "caller disappeared")},
 		{want: []string{"herdr", "agent", "read", developerName, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
 	}}
 	var stderr strings.Builder
@@ -667,7 +667,7 @@ func TestContextCancellationKeepsRecoverableTaskState(t *testing.T) {
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
 		{want: agyProbeArgs("/quota"), result: agyQuotaResult("Gemini Models", 0.8, 0.9)},
 		{want: []string{"herdr", "agent", "read", developerName, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
-		{want: []string{"herdr", "agent", "prompt", developerName, task, "--wait", "--timeout", "300000"}, err: context.Canceled},
+		{want: []string{"herdr", "agent", "prompt", developerName, task, "--wait", "--timeout", "30000"}, err: context.Canceled},
 		{want: []string{"herdr", "agent", "read", developerName, "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
 	}}
 	app := New(runner, &strings.Builder{}, &strings.Builder{})

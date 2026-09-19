@@ -9,14 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/kazimshah39/cagy/internal/herdr"
+	"github.com/kazimshah39/cagy/internal/securestate"
 	"github.com/kazimshah39/cagy/internal/transcript"
 )
 
@@ -76,149 +75,22 @@ type taskInspection struct {
 	developerRunning bool
 }
 
-func defaultStateDir() string {
-	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" && filepath.IsAbs(stateHome) {
-		return filepath.Join(stateHome, "cagy")
-	}
-	configDir, err := os.UserConfigDir()
-	if err == nil && strings.TrimSpace(configDir) != "" {
-		return filepath.Join(configDir, "cagy", "state")
-	}
-	home, err := os.UserHomeDir()
-	if err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".cagy", "state")
-	}
-	return ""
-}
+func defaultStateDir() string { return securestate.DefaultDir() }
 
-func inspectPrivateStateDir(path string) (bool, error) {
-	if strings.TrimSpace(path) == "" {
-		return false, fmt.Errorf("cagy state directory is unavailable")
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect cagy state directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return true, fmt.Errorf("cagy state path is not a private directory")
-	}
-	if info.Mode().Perm() != 0o700 {
-		return true, fmt.Errorf("cagy state directory permissions are %04o, want 0700", info.Mode().Perm())
-	}
-	return true, nil
-}
+func inspectPrivateStateDir(path string) (bool, error) { return securestate.InspectDir(path) }
 
-func ensurePrivateStateDir(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("cagy state directory is unavailable")
-	}
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create cagy state directory: %w", err)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect cagy state directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("cagy state path is not a private directory")
-	}
-	if info.Mode().Perm() != 0o700 {
-		if err := os.Chmod(path, 0o700); err != nil {
-			return fmt.Errorf("secure cagy state directory: %w", err)
-		}
-	}
-	return nil
-}
+func ensurePrivateStateDir(path string) error { return securestate.EnsureDir(path) }
 
 func readPrivateStateFile(path string, maxBytes int64) ([]byte, bool, error) {
-	if maxBytes <= 0 {
-		return nil, false, fmt.Errorf("invalid private state size limit")
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, true, fmt.Errorf("private state is not a regular file")
-	}
-	if info.Mode().Perm() != 0o600 {
-		return nil, true, fmt.Errorf("private state permissions are %04o, want 0600", info.Mode().Perm())
-	}
-	if info.Size() > maxBytes {
-		return nil, true, fmt.Errorf("private state exceeds %d bytes", maxBytes)
-	}
-	// #nosec G304 -- callers pass fixed or SHA-256-derived names below the private cagy state directory.
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, true, err
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, true, err
-	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return nil, true, fmt.Errorf("private state changed while it was opened")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, true, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, true, fmt.Errorf("private state exceeds %d bytes", maxBytes)
-	}
-	return data, true, nil
+	return securestate.ReadFile(path, maxBytes)
 }
 
 func writePrivateStateFile(stateDir, name string, data []byte) error {
-	if name == "" || filepath.Base(name) != name {
-		return fmt.Errorf("invalid private state filename")
-	}
-	if err := ensurePrivateStateDir(stateDir); err != nil {
-		return err
-	}
-	path := filepath.Join(stateDir, name)
-	temporary, err := os.CreateTemp(stateDir, ".cagy-state-*.tmp")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	cleanup := func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		cleanup()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		cleanup()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		_ = os.Remove(temporaryPath)
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		_ = os.Remove(temporaryPath)
-		return err
-	}
-	return syncDirectory(stateDir)
+	return securestate.WriteFile(stateDir, name, data)
 }
 
 func stateFileName(prefix, developer, suffix string) string {
-	sum := sha256.Sum256([]byte(developer))
-	return fmt.Sprintf("%s-%s%s", prefix, hex.EncodeToString(sum[:8]), suffix)
+	return securestate.HashedName(prefix, developer, suffix)
 }
 
 func (a *App) taskJournalPath(developer string) string {
@@ -226,70 +98,79 @@ func (a *App) taskJournalPath(developer string) string {
 }
 
 func (a *App) loadTaskJournal(developer string) (taskJournal, bool, error) {
+	a.debugf("task-journal load begin developer=%q", developer)
 	exists, err := inspectPrivateStateDir(a.stateDir)
 	if err != nil {
+		a.debugf("task-journal load state-dir-error developer=%q error=%q", developer, err)
 		return taskJournal{}, false, err
 	}
 	if !exists {
+		a.debugf("task-journal load none developer=%q reason=%q", developer, "state-directory-missing")
 		return taskJournal{}, false, nil
 	}
 	path := a.taskJournalPath(developer)
 	data, fileExists, err := readPrivateStateFile(path, maxTaskJournalBytes)
 	if err != nil {
+		a.debugf("task-journal load read-error developer=%q exists=%t error=%q", developer, fileExists, err)
 		return taskJournal{}, fileExists, fmt.Errorf("read interrupted-task state: %w", err)
 	}
 	if !fileExists {
+		a.debugf("task-journal load none developer=%q reason=%q", developer, "journal-missing")
 		return taskJournal{}, false, nil
 	}
 	var record taskJournal
 	if err := json.Unmarshal(data, &record); err != nil {
+		a.debugf("task-journal load corrupt developer=%q bytes=%d", developer, len(data))
 		return taskJournal{}, true, fmt.Errorf("interrupted-task state is corrupt at %s", path)
 	}
+	a.debugf("task-journal load success developer=%q phase=%q task=%q has_session=%t receipt_present=%t", developer, record.Phase, debugHashPrefix(record.TaskHash), record.SessionID != "", record.DeliveryReceipt != "")
 	return record, true, nil
 }
 
 func (a *App) writeTaskJournal(record taskJournal) error {
+	a.debugf("task-journal write begin developer=%q phase=%q task=%q has_session=%t receipt_present=%t compact_offset=%d full_offset=%d", record.Developer, record.Phase, debugHashPrefix(record.TaskHash), record.SessionID != "", record.DeliveryReceipt != "", record.CompactOffset, record.FullOffset)
 	record.Version = taskJournalVersion
 	record.UpdatedAt = a.now().UTC()
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
+		a.debugf("task-journal write encode-error developer=%q phase=%q error=%q", record.Developer, record.Phase, err)
 		return fmt.Errorf("encode interrupted-task state: %w", err)
 	}
 	data = append(data, '\n')
 	if len(data) > maxTaskJournalBytes {
+		a.debugf("task-journal write too-large developer=%q bytes=%d", record.Developer, len(data))
 		return fmt.Errorf("interrupted-task state exceeds %d bytes", maxTaskJournalBytes)
 	}
 	name := stateFileName("task", record.Developer, ".json")
 	if err := writePrivateStateFile(a.stateDir, name, data); err != nil {
+		a.debugf("task-journal write error developer=%q phase=%q error=%q", record.Developer, record.Phase, err)
 		return fmt.Errorf("write interrupted-task state: %w", err)
 	}
+	a.debugf("task-journal write success developer=%q phase=%q task=%q bytes=%d", record.Developer, record.Phase, debugHashPrefix(record.TaskHash), len(data))
 	return nil
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open cagy state directory for sync: %w", err)
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync cagy state directory: %w", err)
-	}
-	return nil
-}
+func syncDirectory(path string) error { return securestate.SyncDir(path) }
 
 func (a *App) removeTaskJournal(developer string) error {
+	a.debugf("task-journal remove begin developer=%q", developer)
 	path := a.taskJournalPath(developer)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.debugf("task-journal remove error developer=%q error=%q", developer, err)
 		return fmt.Errorf("remove interrupted-task state: %w", err)
 	}
 	if _, err := os.Stat(a.stateDir); err == nil {
-		return syncDirectory(a.stateDir)
+		if err := syncDirectory(a.stateDir); err != nil {
+			a.debugf("task-journal remove sync-error developer=%q error=%q", developer, err)
+			return err
+		}
 	}
+	a.debugf("task-journal remove success developer=%q", developer)
 	return nil
 }
 
 func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, task string, checkpoint transcript.Checkpoint, phase taskPhase) error {
+	a.debugf("task-tracking begin task=%q developer=%q pane=%q phase=%q", debugTaskFingerprint(task), info.developer, developer.PaneID, phase)
 	now := a.now().UTC()
 	record := taskJournal{
 		Version:             taskJournalVersion,
@@ -320,13 +201,16 @@ func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, 
 		return err
 	}
 	a.activeTask = &record
+	a.debugf("task-tracking active task=%q developer=%q phase=%q", debugHashPrefix(record.TaskHash), record.Developer, record.Phase)
 	return nil
 }
 
 func (a *App) replaceTrackedPrompt(developer herdr.AgentInfo, task string, checkpoint transcript.Checkpoint, phase taskPhase) error {
 	if a.activeTask == nil {
+		a.debugf("task-tracking replace skipped task=%q reason=%q", debugTaskFingerprint(task), "no-active-task")
 		return nil
 	}
+	a.debugf("task-tracking replace task=%q developer=%q pane=%q from_phase=%q to_phase=%q", debugTaskFingerprint(task), a.activeTask.Developer, developer.PaneID, a.activeTask.Phase, phase)
 	a.activeTask.DeveloperPaneID = developer.PaneID
 	a.activeTask.TaskHash = transcript.TaskHash(task)
 	a.activeTask.CheckpointSessionID = checkpoint.SessionID
@@ -362,8 +246,10 @@ func isValidDeliveryReceipt(receipt string) bool {
 
 func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error {
 	if a.activeTask == nil {
+		a.debugf("task-tracking phase skipped to=%q reason=%q", phase, "no-active-task")
 		return nil
 	}
+	previous := a.activeTask.Phase
 	a.activeTask.Phase = phase
 	if phase == taskPhaseCompleted && a.activeTask.DeliveryReceipt == "" {
 		receipt, err := randomDeliveryReceipt()
@@ -382,7 +268,9 @@ func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error 
 	if sessionID, err := exactAgySessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
-	return a.writeTaskJournal(*a.activeTask)
+	err := a.writeTaskJournal(*a.activeTask)
+	a.debugf("task-tracking phase task=%q developer=%q from=%q to=%q ok=%t error=%q", debugHashPrefix(a.activeTask.TaskHash), a.activeTask.Developer, previous, phase, err == nil, err)
+	return err
 }
 
 func (a *App) warnTrackedPhase(phase taskPhase, developer herdr.AgentInfo) {
@@ -462,6 +350,7 @@ func (a *App) journalCheckpoint(record taskJournal, sessionID string) (transcrip
 }
 
 func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
+	a.debugf("task-receipt ensure begin developer=%q task=%q phase=%q receipt_present=%t", record.Developer, debugHashPrefix(record.TaskHash), record.Phase, record.DeliveryReceipt != "")
 	receipt := record.DeliveryReceipt
 	needsWrite := false
 
@@ -486,9 +375,11 @@ func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
 
 	if needsWrite {
 		if err := a.writeTaskJournal(*record); err != nil {
+			a.debugf("task-receipt ensure error developer=%q task=%q error=%q", record.Developer, debugHashPrefix(record.TaskHash), err)
 			return "", fmt.Errorf("save delivery receipt for completed task: %w", err)
 		}
 	}
+	a.debugf("task-receipt ensure success developer=%q task=%q created=%t", record.Developer, debugHashPrefix(record.TaskHash), needsWrite)
 	return receipt, nil
 }
 
@@ -499,7 +390,11 @@ func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
 // taskInspection is empty. Callers in the locked delivery paths must call
 // ensureCompletedReceipt to generate and persist a receipt before delivering.
 // Legacy v1→v2 receipt migration also happens only in that persisting path.
-func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, record taskJournal) (taskInspection, error) {
+func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, record taskJournal) (inspection taskInspection, inspectErr error) {
+	a.debugf("task-inspect begin developer=%q task=%q phase=%q pane=%q has_session=%t", record.Developer, debugHashPrefix(record.TaskHash), record.Phase, record.DeveloperPaneID, record.SessionID != "")
+	defer func() {
+		a.debugf("task-inspect end developer=%q task=%q kind=%q response_bytes=%d developer_running=%t ok=%t error=%q", record.Developer, debugHashPrefix(record.TaskHash), inspection.kind, len(inspection.response), inspection.developerRunning, inspectErr == nil, inspectErr)
+	}()
 	if err := validateTaskJournal(record, info); err != nil {
 		return taskInspection{}, err
 	}
@@ -614,17 +509,21 @@ func (a *App) interruptedTaskStillRunning(ctx context.Context, info runtimeConte
 }
 
 func (a *App) ensureNoInterruptedTask(ctx context.Context, info runtimeContext) error {
+	a.debugf("task-guard begin developer=%q", info.developer)
 	record, exists, err := a.loadTaskJournal(info.developer)
 	if err != nil {
 		return err
 	}
 	if !exists {
+		a.debugf("task-guard clear developer=%q", info.developer)
 		return nil
 	}
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
 	if err != nil {
+		a.debugf("task-guard invalid developer=%q task=%q error=%q", info.developer, debugHashPrefix(record.TaskHash), err)
 		return fmt.Errorf("interrupted-task state is invalid: %w; run cagy doctor", err)
 	}
+	a.debugf("task-guard blocked developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), inspection.kind)
 	switch inspection.kind {
 	case taskInspectionCompleted:
 		return fmt.Errorf("a previous task completed but its answer was not acknowledged; run: cagy ask --recover")
@@ -638,6 +537,7 @@ func (a *App) ensureNoInterruptedTask(ctx context.Context, info runtimeContext) 
 }
 
 func (a *App) recoverInterruptedTask(ctx context.Context) error {
+	a.debugf("task-cli-recover begin")
 	info, err := a.context()
 	if err != nil {
 		return err
@@ -652,6 +552,7 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 		return err
 	}
 	if !exists {
+		a.debugf("task-cli-recover none developer=%q", info.developer)
 		return fmt.Errorf("there is no interrupted task to recover")
 	}
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
@@ -659,6 +560,7 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 		return err
 	}
 	if inspection.kind != taskInspectionCompleted {
+		a.debugf("task-cli-recover unavailable developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), inspection.kind)
 		return fmt.Errorf("interrupted task is not safely recoverable yet: %s", inspection.message)
 	}
 	// Persist the delivery receipt (and v1→v2 migration) before attempting
@@ -682,10 +584,12 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 	if err := a.acknowledgeLockedTask(updatedRecord, receipt, info); err != nil {
 		return fmt.Errorf("agy answer was recovered, but durable task state could not be cleared; run cagy doctor: %w", err)
 	}
+	a.debugf("task-cli-recover success developer=%q task=%q response_bytes=%d", info.developer, debugHashPrefix(record.TaskHash), len(inspection.response))
 	return nil
 }
 
 func (a *App) acknowledgeLockedTask(record taskJournal, receipt string, info runtimeContext) error {
+	a.debugf("task-ack locked begin developer=%q task=%q phase=%q receipt_shape_valid=%t", info.developer, debugHashPrefix(record.TaskHash), record.Phase, isValidDeliveryReceipt(receipt))
 	if err := validateTaskJournal(record, info); err != nil {
 		return err
 	}
@@ -693,6 +597,7 @@ func (a *App) acknowledgeLockedTask(record taskJournal, receipt string, info run
 		return fmt.Errorf("task is not completed (current phase: %s)", record.Phase)
 	}
 	if subtle.ConstantTimeCompare([]byte(record.DeliveryReceipt), []byte(receipt)) != 1 {
+		a.debugf("task-ack locked mismatch developer=%q task=%q", info.developer, debugHashPrefix(record.TaskHash))
 		return fmt.Errorf("invalid delivery receipt: receipt does not match the active completed task")
 	}
 	if err := a.removeTaskJournal(info.developer); err != nil {
@@ -701,10 +606,12 @@ func (a *App) acknowledgeLockedTask(record taskJournal, receipt string, info run
 	if a.activeTask != nil && a.activeTask.Developer == info.developer {
 		a.activeTask = nil
 	}
+	a.debugf("task-ack locked success developer=%q task=%q", info.developer, debugHashPrefix(record.TaskHash))
 	return nil
 }
 
 func (a *App) acknowledgeTask(ctx context.Context, receipt string) error {
+	a.debugf("task-ack begin receipt_shape_valid=%t", isValidDeliveryReceipt(strings.TrimSpace(receipt)))
 	receipt = strings.TrimSpace(receipt)
 	if !isValidDeliveryReceipt(receipt) {
 		return fmt.Errorf("invalid delivery receipt: must be 32 lowercase hexadecimal characters")
@@ -724,18 +631,21 @@ func (a *App) acknowledgeTask(ctx context.Context, receipt string) error {
 		return err
 	}
 	if !exists {
+		a.debugf("task-ack none developer=%q", info.developer)
 		return fmt.Errorf("no unacknowledged task exists")
 	}
 	return a.acknowledgeLockedTask(record, receipt, info)
 }
 
 func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
+	a.debugf("task-status begin")
 	info, err := a.context()
 	if err != nil {
 		return nil, err
 	}
 	record, exists, loadErr := a.loadTaskJournal(info.developer)
 	if loadErr != nil {
+		a.debugf("task-status journal-error developer=%q error=%q", info.developer, loadErr)
 		fmt.Fprintf(a.stderr, "cagy warning: task journal is unreadable: %v\n", loadErr)
 		return &TaskStatusOutput{
 			Status:  "uncertain",
@@ -746,6 +656,7 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 		developer, err := a.herdr.GetAgent(ctx, info.developer)
 		if err != nil {
 			if herdr.IsCode(err, "agent_not_found") {
+				a.debugf("task-status none developer=%q developer_running=false", info.developer)
 				return &TaskStatusOutput{
 					Status:  "none",
 					Message: "no active task; developer is not running",
@@ -753,6 +664,7 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 			}
 			return nil, fmt.Errorf("check developer status: %w", err)
 		}
+		a.debugf("task-status none developer=%q agent_status=%q", info.developer, developer.AgentStatus)
 		return &TaskStatusOutput{
 			Status:  "none",
 			Message: fmt.Sprintf("no active task; developer is %s", developer.AgentStatus),
@@ -761,6 +673,7 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
 	if err != nil {
+		a.debugf("task-status inspect-error developer=%q task=%q error=%q", info.developer, debugHashPrefix(record.TaskHash), err)
 		fmt.Fprintf(a.stderr, "cagy warning: task state is invalid: %v\n", err)
 		return &TaskStatusOutput{
 			Status:  "uncertain",
@@ -775,6 +688,7 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 
 	switch inspection.kind {
 	case taskInspectionCompleted:
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q", info.developer, debugHashPrefix(record.TaskHash), "completed_unacknowledged", elapsed)
 		return &TaskStatusOutput{
 			Status:                  "completed_unacknowledged",
 			Message:                 inspection.message,
@@ -789,18 +703,21 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 		} else if record.Phase == taskPhaseRecovering {
 			status = "recovering"
 		}
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q", info.developer, debugHashPrefix(record.TaskHash), status, elapsed)
 		return &TaskStatusOutput{
 			Status:  status,
 			Message: inspection.message,
 			Elapsed: elapsed,
 		}, nil
 	case taskInspectionBlocked:
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q", info.developer, debugHashPrefix(record.TaskHash), "blocked", elapsed)
 		return &TaskStatusOutput{
 			Status:  "blocked",
 			Message: inspection.message,
 			Elapsed: elapsed,
 		}, nil
 	default:
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q", info.developer, debugHashPrefix(record.TaskHash), "uncertain", elapsed)
 		return &TaskStatusOutput{
 			Status:  "uncertain",
 			Message: inspection.message,
@@ -810,6 +727,7 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 }
 
 func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
+	a.debugf("task-recover begin")
 	info, err := a.context()
 	if err != nil {
 		return nil, err
@@ -825,6 +743,7 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 		return nil, err
 	}
 	if !exists {
+		a.debugf("task-recover none developer=%q", info.developer)
 		return nil, fmt.Errorf("there is no interrupted task to recover")
 	}
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
@@ -832,6 +751,7 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 		return nil, err
 	}
 	if inspection.kind != taskInspectionCompleted {
+		a.debugf("task-recover unavailable developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), inspection.kind)
 		return nil, fmt.Errorf("interrupted task is not safely recoverable yet: %s", inspection.message)
 	}
 	// Persist receipt (and v1→v2 migration) before returning it to the caller.
@@ -839,6 +759,7 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("save delivery receipt before recovery: %w", err)
 	}
+	a.debugf("task-recover success developer=%q task=%q response_bytes=%d", info.developer, debugHashPrefix(record.TaskHash), len(inspection.response))
 	return &RecoverTaskOutput{
 		Status:                  "completed_unacknowledged",
 		Answer:                  inspection.response,
@@ -848,6 +769,7 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 }
 
 func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, error) {
+	a.debugf("task-forget begin confirm=%t", confirm)
 	if !confirm {
 		return nil, fmt.Errorf("forgetting task state requires explicit confirm=true")
 	}
@@ -879,9 +801,11 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 		if a.activeTask != nil && a.activeTask.Developer == info.developer {
 			a.activeTask = nil
 		}
+		a.debugf("task-forget success developer=%q kind=%q", info.developer, "unreadable")
 		return &ForgetTaskOutput{Status: "forgotten", Message: "forgot unreadable interrupted-task state"}, nil
 	}
 	if !exists {
+		a.debugf("task-forget none developer=%q", info.developer)
 		return nil, fmt.Errorf("there is no interrupted task state to forget")
 	}
 	inspection, inspectErr := a.inspectTaskJournal(ctx, info, record)
@@ -904,6 +828,7 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 	if a.activeTask != nil && a.activeTask.Developer == info.developer {
 		a.activeTask = nil
 	}
+	a.debugf("task-forget success developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), "normal")
 	return &ForgetTaskOutput{Status: "forgotten", Message: "forgot interrupted-task state"}, nil
 }
 
@@ -917,6 +842,7 @@ func (a *App) forgetInterruptedTask(ctx context.Context) error {
 }
 
 func (a *App) reportTaskJournal(ctx context.Context) error {
+	a.debugf("task-report begin")
 	info, err := a.context()
 	if err != nil {
 		return err
@@ -926,6 +852,7 @@ func (a *App) reportTaskJournal(ctx context.Context) error {
 		return err
 	}
 	if !exists {
+		a.debugf("task-report none developer=%q", info.developer)
 		fmt.Fprintln(a.stdout, "✓ interrupted task state: none")
 		return nil
 	}
@@ -947,122 +874,39 @@ func (a *App) reportTaskJournal(ctx context.Context) error {
 	default:
 		fmt.Fprintf(a.stdout, "! interrupted task state: uncertain: %s\n", inspection.message)
 	}
+	a.debugf("task-report attention developer=%q task=%q kind=%q age=%s", info.developer, debugHashPrefix(record.TaskHash), inspection.kind, age)
 	return errTaskAttention
 }
 
-type taskLockMetadata struct {
-	PID       int       `json:"pid"`
-	Developer string    `json:"developer"`
-	StartedAt time.Time `json:"started_at"`
-}
+type taskLockMetadata = securestate.LockMetadata
 
 type taskLock struct {
-	path string
-	file *os.File
-	info os.FileInfo
+	lock *securestate.Lock
 }
 
 func acquireLock(stateDir, developer string, now time.Time) (*taskLock, error) {
-	if err := ensurePrivateStateDir(stateDir); err != nil {
+	lock, err := securestate.Acquire(stateDir, securestate.LockOptions{
+		Name:        stateFileName("lock", developer, ".json"),
+		Subject:     developer,
+		Now:         now,
+		StaleGrace:  staleLockGrace,
+		MaxLifetime: maxTaskLockLifetime,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "operation is busy") {
+			return nil, fmt.Errorf("developer is busy; another cagy ask process owns %s", filepath.Join(stateDir, stateFileName("lock", developer, ".json")))
+		}
 		return nil, err
 	}
-	path := filepath.Join(stateDir, stateFileName("lock", developer, ".json"))
-	for attempt := 0; attempt < 2; attempt++ {
-		// #nosec G304 -- path is below cagy's private state directory and uses a SHA-256 filename.
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			metadata := taskLockMetadata{PID: os.Getpid(), Developer: developer, StartedAt: now.UTC()}
-			if encodeErr := json.NewEncoder(file).Encode(metadata); encodeErr != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("write task lock: %w", encodeErr)
-			}
-			if syncErr := file.Sync(); syncErr != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("sync task lock: %w", syncErr)
-			}
-			info, statErr := file.Stat()
-			if statErr != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("inspect task lock: %w", statErr)
-			}
-			if syncErr := syncDirectory(stateDir); syncErr != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, syncErr
-			}
-			return &taskLock{path: path, file: file, info: info}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("create task lock: %w", err)
-		}
-		stale, staleErr := staleTaskLock(path, developer, now)
-		if staleErr != nil {
-			return nil, staleErr
-		}
-		if !stale {
-			return nil, fmt.Errorf("developer is busy; another cagy ask process owns %s", path)
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove stale task lock: %w", removeErr)
-		}
-		if syncErr := syncDirectory(stateDir); syncErr != nil {
-			return nil, syncErr
-		}
-	}
-	return nil, fmt.Errorf("could not acquire task lock after stale-lock cleanup")
+	return &taskLock{lock: lock}, nil
 }
 
 func staleTaskLock(path, developer string, now time.Time) (bool, error) {
-	data, exists, err := readPrivateStateFile(path, maxTaskLockBytes)
-	if err != nil {
-		return false, fmt.Errorf("read existing task lock: %w", err)
-	}
-	if !exists {
-		return true, nil
-	}
-	var metadata taskLockMetadata
-	decodeErr := json.Unmarshal(data, &metadata)
-	if decodeErr == nil && metadata.Developer == developer && metadata.PID > 0 {
-		age := now.Sub(metadata.StartedAt)
-		if metadata.StartedAt.IsZero() || age < -staleLockGrace || age > maxTaskLockLifetime {
-			return true, nil
-		}
-		return !processAlive(metadata.PID), nil
-	}
-	info, statErr := os.Lstat(path)
-	if statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
-			return true, nil
-		}
-		return false, fmt.Errorf("inspect existing task lock: %w", statErr)
-	}
-	if now.Sub(info.ModTime()) >= staleLockGrace {
-		return true, nil
-	}
-	return false, fmt.Errorf("developer task lock is incomplete and too new to remove safely")
-}
-
-func processAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return securestate.IsStale(path, developer, now, staleLockGrace, maxTaskLockLifetime)
 }
 
 func (l *taskLock) release() {
-	if l == nil {
-		return
+	if l != nil {
+		l.lock.Release()
 	}
-	_ = l.file.Close()
-	current, err := os.Lstat(l.path)
-	if err != nil || !os.SameFile(l.info, current) {
-		return
-	}
-	_ = os.Remove(l.path)
-	_ = syncDirectory(filepath.Dir(l.path))
 }

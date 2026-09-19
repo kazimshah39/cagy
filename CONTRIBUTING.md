@@ -13,11 +13,10 @@ Thanks for helping improve cagy.
 
 Requirements:
 
-- Go 1.22 or newer
+- Go 1.25 or newer on Apple Silicon macOS
 - Herdr
 - Codex CLI
 - agy CLI
-- AGM
 
 Clone the repository, then run:
 
@@ -31,7 +30,7 @@ go vet ./...
 go build ./cmd/cagy
 ```
 
-Automated tests must use fake process runners and local fixtures. They must not launch real Codex or agy sessions, consume model quota, or switch a real AGM account.
+Automated tests must use fake process runners, fake Keychain adapters, and local fixtures. They must not launch real Codex or agy sessions, consume model quota, or switch a real account. The supported target is macOS Apple Silicon (`darwin/arm64`); do not add Linux, Windows, or Intel-only release targets.
 
 ## Pull requests
 

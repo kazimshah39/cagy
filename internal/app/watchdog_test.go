@@ -17,7 +17,7 @@ import (
 
 func TestRunDeveloperTaskDetectsSilentQuotaExhaustion(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: jsonError("timeout", "timed out waiting for agent status")},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: jsonError("timeout", "timed out waiting for agent status")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n⠋ Working...\n")},
 		{want: []string{"herdr", "agent", "get", "developer"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "working", testConversationID)},
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
@@ -29,7 +29,7 @@ func TestRunDeveloperTaskDetectsSilentQuotaExhaustion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.quotaExhausted {
+	if !result.needsQuotaRecovery() {
 		t.Fatal("expected silent quota exhaustion")
 	}
 	runner.assertDone()
@@ -42,7 +42,7 @@ func TestRunDeveloperTaskReturnsTranscriptEvenWhenPromptWaitTimesOut(t *testing.
 	brainRoot := t.TempDir()
 	writeAgyTranscript(t, brainRoot, testConversationID, "do the work", "Finished safely.")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: jsonError("timeout", "timed out waiting for agent status")},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: jsonError("timeout", "timed out waiting for agent status")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nFinished safely.\n")},
 		{want: []string{"herdr", "agent", "get", "developer"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: agyProbeArgs("/model"), result: agyModelResult("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)")},
@@ -71,7 +71,7 @@ func TestRunDeveloperTaskFalseSettledStateContinuesUntilTranscriptFinal(t *testi
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nesc to cancel\n")},
 		{
 			want:   []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"},
@@ -101,7 +101,7 @@ func TestRunDeveloperTaskToleratesRepeatedTransientSettledStates(t *testing.T) {
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "idle", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "idle", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nesc to cancel\n")},
 		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult("response streaming\nesc to cancel\n")},
@@ -134,7 +134,7 @@ func TestRunDeveloperTaskDoesNotReturnIntermediatePlannerUpdate(t *testing.T) {
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	appendAgyAnswer(t, brainRoot, testConversationID, "I am still checking the files.")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nI am still checking the files.\nesc to cancel\n")},
 		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult("I am still checking the files.\n────────────────────\nesc to cancel\n")},
@@ -161,7 +161,7 @@ func TestRunDeveloperTaskDoesNotReturnIntermediatePlannerUpdate(t *testing.T) {
 
 func TestRunDeveloperTaskDoesNotReturnTerminalScrollbackWhenBlocked(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "blocked", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "blocked", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\ninternal tool details\n")},
 	}}
 	application := New(runner, &strings.Builder{}, &strings.Builder{})
@@ -178,7 +178,7 @@ func TestRunDeveloperTaskDoesNotReturnTerminalScrollbackWhenBlocked(t *testing.T
 
 func TestRunDeveloperTaskBlockedWaitDoesNotReturnTerminalScrollback(t *testing.T) {
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\ninternal tool details\n")},
 		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "blocked", testConversationID)},
 	}}
@@ -198,7 +198,7 @@ func TestRunDeveloperTaskPromptStallDoesNotConsumeFiveMinuteSegment(t *testing.T
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: jsonError("agent_prompt_stalled", "no activity observed")},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: jsonError("agent_prompt_stalled", "no activity observed")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n")},
 		{want: []string{"herdr", "agent", "get", "developer"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "working", testConversationID)},
 		{
@@ -216,7 +216,7 @@ func TestRunDeveloperTaskPromptStallDoesNotConsumeFiveMinuteSegment(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.output != "Finished after the stalled status signal." || result.quotaExhausted {
+	if result.output != "Finished after the stalled status signal." || result.needsQuotaRecovery() {
 		t.Fatalf("result=%+v", result)
 	}
 	runner.assertDone()
@@ -229,7 +229,7 @@ func TestRunDeveloperTaskIgnoresOldQuotaTextOnVisibleScreen(t *testing.T) {
 	brainRoot := t.TempDir()
 	writeAgyTranscript(t, brainRoot, testConversationID, "do the work", "Finished safely.")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nFinished safely.\n")},
 		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult("Old turn: RESOURCE_EXHAUSTED quota exceeded\n────────────────────\n>\n────────────────────\n? for shortcuts\n")},
@@ -242,7 +242,7 @@ func TestRunDeveloperTaskIgnoresOldQuotaTextOnVisibleScreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.output != "Finished safely." || result.quotaExhausted {
+	if result.output != "Finished safely." || result.needsQuotaRecovery() {
 		t.Fatalf("result=%+v", result)
 	}
 	runner.assertDone()
@@ -256,7 +256,7 @@ func TestRunDeveloperTaskWaitsForTranscriptBackgroundTask(t *testing.T) {
 	appendAgyEvent(t, brainRoot, testConversationID, "MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+taskID)
 	appendAgyAnswer(t, brainRoot, testConversationID, "Still waiting.")
 	steps := []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", task, "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", task, "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\nStill waiting.\n")},
 		{want: []string{"herdr", "agent", "wait", "developer", "--until", "blocked", "--timeout", "1000"}, result: jsonError("timeout", "timed out")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "visible", "--lines", "80"}, result: textResult(">\n? for shortcuts\n")},
@@ -289,7 +289,7 @@ func TestRunDeveloperTaskStableIdleWithoutTranscriptFailsClearly(t *testing.T) {
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	steps := []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "done", testConversationID)},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n? for shortcuts\n")},
 	}
 	for range 3 {
@@ -317,7 +317,7 @@ func TestRunDeveloperTaskProbeFailureDoesNotSwitchBlindly(t *testing.T) {
 	brainRoot := t.TempDir()
 	writeAgyTaskOnly(t, brainRoot, testConversationID, "do the work")
 	runner := &scriptedRunner{t: t, steps: []runStep{
-		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "300000"}, result: jsonError("timeout", "timed out waiting for agent status")},
+		{want: []string{"herdr", "agent", "prompt", "developer", "do the work", "--wait", "--timeout", "30000"}, result: jsonError("timeout", "timed out waiting for agent status")},
 		{want: []string{"herdr", "agent", "read", "developer", "--source", "recent-unwrapped", "--lines", "400"}, result: textResult("old\n⠋ Working...\n")},
 		{want: []string{"herdr", "agent", "get", "developer"}, result: agentJSONWithSession("w1:p2", "w1", "/tmp/project", "working", testConversationID)},
 		{want: agyProbeArgs("/model"), result: textResult("not-json")},
@@ -336,41 +336,13 @@ func TestRunDeveloperTaskProbeFailureDoesNotSwitchBlindly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.quotaExhausted {
+	if result.needsQuotaRecovery() {
 		t.Fatal("probe failure must not be treated as empty quota")
 	}
 	if result.output != "Finished after the probe failed." {
 		t.Fatalf("output = %q", result.output)
 	}
 	runner.assertDone()
-}
-
-func TestRunDeveloperTaskStopsAfterThirtyMinuteWaitBudget(t *testing.T) {
-	if developerWaitSegmentMS != 5*60*1000 || developerMaxWaits != 6 {
-		t.Fatalf("wait policy: segment=%d max=%d", developerWaitSegmentMS, developerMaxWaits)
-	}
-	runner := &watchdogLoopRunner{}
-	var stderr strings.Builder
-	application := New(runner, &strings.Builder{}, &stderr)
-	application.developerPoll = 5 * time.Minute
-
-	_, err := application.runDeveloperTask(context.Background(), "developer", "do the work", "old\n", transcript.Checkpoint{})
-	if err == nil || !strings.Contains(err.Error(), "30 minutes") {
-		t.Fatalf("error = %v", err)
-	}
-	if runner.promptCalls != 1 {
-		t.Fatalf("prompt calls = %d", runner.promptCalls)
-	}
-	if runner.waitCalls != developerMaxWaits-1 {
-		t.Fatalf("wait calls = %d, want %d", runner.waitCalls, developerMaxWaits-1)
-	}
-	if runner.modelCalls != developerMaxWaits || runner.quotaCalls != developerMaxWaits {
-		t.Fatalf("probe calls: model=%d quota=%d want=%d", runner.modelCalls, runner.quotaCalls, developerMaxWaits)
-	}
-	status := stderr.String()
-	if !strings.Contains(status, "submitting one task") || !strings.Contains(status, "still running after 5m0s") || !strings.Contains(status, "still running after 30m0s") {
-		t.Fatalf("missing lifecycle heartbeat in stderr: %q", status)
-	}
 }
 
 func TestAgyVisibleStateReadsOnlyTheFooter(t *testing.T) {
@@ -640,4 +612,11 @@ func TestAgyQuotaExhaustedParsesMachineReadableCommands(t *testing.T) {
 		t.Fatal("expected quota exhaustion")
 	}
 	runner.assertDone()
+}
+
+func TestWatchdogTimingDefaultsAreIndependent(t *testing.T) {
+	app := New(&fakeRunner{}, &strings.Builder{}, &strings.Builder{})
+	if app.initialPromptWait != 30*time.Second || app.quotaProbeInterval != 45*time.Second || app.healthyStallWindow != 150*time.Second || app.heartbeatInterval != 5*time.Minute || app.taskDeadline != 30*time.Minute || app.developerPoll != time.Second {
+		t.Fatalf("unexpected watchdog defaults: %+v", app)
+	}
 }

@@ -2,8 +2,8 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -14,61 +14,50 @@ import (
 )
 
 const (
-	developerWaitSegmentMS     = 5 * 60 * 1000
-	developerMaxWaits          = developerPromptTimeoutMS / developerWaitSegmentMS
-	agyWeeklySwitchThreshold   = 0.03
-	agyFiveHourSwitchThreshold = 0.02
+	defaultInitialPromptWait  = 30 * time.Second
+	defaultQuotaProbeInterval = 45 * time.Second
+	defaultHealthyStallWindow = 150 * time.Second
+	defaultHeartbeatInterval  = 5 * time.Minute
+	defaultTaskDeadline       = 30 * time.Minute
 )
 
 var agyBackgroundTasksPattern = regexp.MustCompile(`\b[1-9][0-9]*\s+(?:tasks?|task\(s\))(?:\s|$)`)
 
 type developerTaskResult struct {
-	agent          herdr.AgentInfo
-	output         string
-	quotaExhausted bool
+	agent  herdr.AgentInfo
+	output string
+	quota  quotaProbeResult
 }
 
-type agyCommandEnvelope struct {
-	Status  string `json:"status"`
-	Command struct {
-		Name string          `json:"name"`
-		Data json.RawMessage `json:"data"`
-	} `json:"command"`
-}
-
-type agyModel struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-}
-
-type agyQuota struct {
-	Groups []agyQuotaGroup `json:"groups"`
-}
-
-type agyQuotaGroup struct {
-	Name    string           `json:"name"`
-	Buckets []agyQuotaBucket `json:"buckets"`
-}
-
-type agyQuotaBucket struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	RemainingFraction *float64 `json:"remaining_fraction"`
+func (r developerTaskResult) needsQuotaRecovery() bool {
+	return r.quota.Class == quotaLow || r.quota.Class == quotaExhausted
 }
 
 func (a *App) runDeveloperTask(ctx context.Context, target, task, before string, checkpoint transcript.Checkpoint) (developerTaskResult, error) {
-	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(developerPromptTimeoutMS)*time.Millisecond)
+	taskID := debugTaskFingerprint(task)
+	deadline := a.taskDeadline
+	if deadline <= 0 {
+		deadline = defaultTaskDeadline
+	}
+	initialWait := a.initialPromptWait
+	if initialWait <= 0 {
+		initialWait = defaultInitialPromptWait
+	}
+	a.debugf("watchdog task-start task=%q target=%q deadline=%s initial_wait=%s", taskID, target, deadline, initialWait)
+	taskCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
 	fmt.Fprintln(a.stderr, "cagy: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
-	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, developerWaitSegmentMS)
+	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, durationMS(initialWait))
+	a.debugf("watchdog prompt-result task=%q status=%q pane=%q error=%q", taskID, settled.AgentStatus, settled.PaneID, waitErr)
 	after, readErr := a.herdr.ReadAgent(taskCtx, target, 400)
 	if readErr != nil {
 		return developerTaskResult{}, fmt.Errorf("read agy response: %w", readErr)
 	}
 	newOutput := quota.NewOutput(before, after)
 	if quota.DetectedResponse(newOutput, task) {
-		return developerTaskResult{agent: settled, output: newOutput, quotaExhausted: true}, nil
+		a.debugf("watchdog visible-quota task=%q detected=true", taskID)
+		return developerTaskResult{agent: settled, output: newOutput, quota: quotaProbeResult{Class: quotaExhausted, Reason: "visible provider quota error", ObservedAt: a.now().UTC()}}, nil
 	}
 	if waitErr != nil && !herdr.IsCode(waitErr, "timeout") && !herdr.IsCode(waitErr, "agent_prompt_stalled") {
 		return developerTaskResult{}, waitErr
@@ -78,31 +67,28 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 	if err != nil {
 		return developerTaskResult{}, err
 	}
+	a.debugf("watchdog transcript-agent task=%q status=%q has_session=%t", taskID, current.AgentStatus, current.AgentSession != nil)
 	if current.AgentStatus == "blocked" {
 		a.warnTrackedPhase(taskPhaseBlocked, current)
 		return developerTaskResult{agent: current}, nil
 	}
 	a.warnTrackedPhase(taskPhaseMonitoring, current)
-
-	remaining := time.Duration(developerPromptTimeoutMS) * time.Millisecond
-	var lastProbeErr error
+	remaining := deadline
 	if herdr.IsCode(waitErr, "timeout") {
-		// A timeout consumed the first five-minute segment. The prompt was
-		// still submitted exactly once.
-		remaining -= time.Duration(developerWaitSegmentMS) * time.Millisecond
-		a.reportTaskProgress(current, time.Duration(developerPromptTimeoutMS)*time.Millisecond-remaining)
-		exhausted, probeErr := a.agyQuotaExhausted(taskCtx)
-		if probeErr != nil {
-			lastProbeErr = probeErr
-		} else {
-			lastProbeErr = nil
-			if exhausted {
-				return developerTaskResult{agent: current, output: newOutput, quotaExhausted: true}, nil
-			}
+		remaining -= initialWait
+		if remaining < 0 {
+			remaining = 0
+		}
+		// A full initial timeout is a useful early signal. Probe once now so a
+		// strong provider quota failure is handled without another delay;
+		// unknown failures never cause an account switch.
+		probe := a.probeDeveloperQuota(taskCtx, target)
+		a.debugf("watchdog early-probe task=%q class=%q reason=%q", taskID, probe.Class, probe.Reason)
+		if probe.Class == quotaLow || probe.Class == quotaExhausted {
+			return developerTaskResult{agent: current, output: newOutput, quota: probe}, nil
 		}
 	}
-
-	return a.monitorDeveloperTask(taskCtx, target, task, before, checkpoint, current, remaining, lastProbeErr)
+	return a.monitorDeveloperTask(taskCtx, target, task, before, checkpoint, current, remaining, nil)
 }
 
 // monitorDeveloperTask requires both a stable real idle footer and the exact
@@ -113,8 +99,9 @@ func (a *App) monitorDeveloperTask(
 	checkpoint transcript.Checkpoint,
 	current herdr.AgentInfo,
 	remaining time.Duration,
-	lastProbeErr error,
+	_ error,
 ) (developerTaskResult, error) {
+	taskID := debugTaskFingerprint(task)
 	poll := a.developerPoll
 	if poll <= 0 {
 		poll = time.Second
@@ -127,12 +114,37 @@ func (a *App) monitorDeveloperTask(
 	if missingWait <= 0 {
 		missingWait = 30 * time.Second
 	}
+	probeInterval := a.quotaProbeInterval
+	if probeInterval <= 0 {
+		probeInterval = defaultQuotaProbeInterval
+	}
+	stallWindow := a.healthyStallWindow
+	if stallWindow <= 0 {
+		stallWindow = defaultHealthyStallWindow
+	}
+	heartbeat := a.heartbeatInterval
+	if heartbeat <= 0 {
+		heartbeat = defaultHeartbeatInterval
+	}
 
 	idleFor := time.Duration(0)
 	idleWithoutResponse := time.Duration(0)
 	sinceTranscriptCheck := time.Duration(0)
 	sinceProbe := time.Duration(0)
+	sinceHeartbeat := time.Duration(0)
+	stallFor := time.Duration(0)
+	elapsed := time.Duration(0)
 	latestOutput := ""
+	tracker := NewProgressTracker(nil)
+	lastVisibleState := ""
+	a.debugf("watchdog monitor-begin task=%q target=%q remaining=%s poll=%s probe=%s stall=%s", taskID, target, remaining, poll, probeInterval, stallWindow)
+	progressCheckpoint := checkpoint
+	if progressCheckpoint.Path == "" && current.AgentSession != nil {
+		if paths, err := transcript.PathsFor(a.agyBrainRoot, transcript.Ref{Source: current.AgentSession.Source, Agent: current.AgentSession.Agent, Kind: current.AgentSession.Kind, Value: current.AgentSession.Value}); err == nil {
+			progressCheckpoint.Path = paths.Compact
+			progressCheckpoint.FullPath = paths.Full
+		}
+	}
 	for remaining > 0 {
 		step := poll
 		if step > remaining {
@@ -153,31 +165,40 @@ func (a *App) monitorDeveloperTask(
 		}
 
 		remaining -= step
+		elapsed += step
 		sinceProbe += step
-
+		sinceHeartbeat += step
 		visible, visibleErr := a.herdr.ReadAgentVisible(ctx, target, 80)
 		if visibleErr != nil {
 			return developerTaskResult{}, fmt.Errorf("read agy visible state: %w", visibleErr)
 		}
-		switch agyVisibleState(visible) {
+		snapshot := progressSnapshotFor(progressCheckpoint, visible, current.AgentStatus)
+		if tracker.Observe(snapshot) {
+			stallFor = 0
+		} else {
+			stallFor += step
+		}
+
+		visibleState := agyVisibleState(visible)
+		if visibleState != lastVisibleState {
+			a.debugf("watchdog visible-state task=%q state=%q agent_status=%q elapsed=%s", taskID, visibleState, current.AgentStatus, elapsed)
+			lastVisibleState = visibleState
+		}
+		switch visibleState {
 		case "working":
-			idleFor = 0
-			idleWithoutResponse = 0
-			sinceTranscriptCheck = 0
+			idleFor, idleWithoutResponse, sinceTranscriptCheck = 0, 0, 0
 		case "idle":
 			idleFor += step
 			sinceTranscriptCheck += step
 			if idleFor >= flushWait && sinceTranscriptCheck >= flushWait {
 				checkElapsed := sinceTranscriptCheck
 				sinceTranscriptCheck = 0
-				// A non-empty planner response can be a progress update while a
-				// transcript-visible background task is still running. Require
-				// stable idle plus no pending background work before returning it.
 				state, transcriptErr := a.completedTranscriptState(checkpoint, current, task)
 				if transcriptErr != nil {
 					return developerTaskResult{}, transcriptErr
 				}
 				if state.Found {
+					a.debugf("watchdog transcript-complete task=%q response_bytes=%d elapsed=%s", taskID, len(state.Response), elapsed)
 					return developerTaskResult{agent: current, output: state.Response}, nil
 				}
 				if state.BackgroundPending {
@@ -190,39 +211,65 @@ func (a *App) monitorDeveloperTask(
 				}
 			}
 		default:
-			// Unknown screen states are not proof of completion.
-			idleFor = 0
-			idleWithoutResponse = 0
-			sinceTranscriptCheck = 0
+			idleFor, idleWithoutResponse, sinceTranscriptCheck = 0, 0, 0
 		}
 
-		if sinceProbe >= time.Duration(developerWaitSegmentMS)*time.Millisecond {
-			a.reportTaskProgress(current, time.Duration(developerPromptTimeoutMS)*time.Millisecond-remaining)
+		if sinceHeartbeat >= heartbeat {
+			a.debugf("watchdog heartbeat task=%q elapsed=%s status=%q stall=%s", taskID, elapsed, current.AgentStatus, stallFor)
+			a.reportTaskProgress(current, elapsed)
+			sinceHeartbeat = 0
+		}
+		if sinceProbe >= probeInterval {
 			recent, readErr := a.herdr.ReadAgent(ctx, target, 400)
 			if readErr != nil {
 				return developerTaskResult{}, fmt.Errorf("read agy response: %w", readErr)
 			}
 			latestOutput = quota.NewOutput(before, recent)
 			if quota.DetectedResponse(latestOutput, task) {
-				return developerTaskResult{agent: current, output: latestOutput, quotaExhausted: true}, nil
+				return developerTaskResult{agent: current, output: latestOutput, quota: quotaProbeResult{Class: quotaExhausted, Reason: "visible provider quota error", ObservedAt: a.now().UTC()}}, nil
 			}
-			exhausted, probeErr := a.agyQuotaExhausted(ctx)
-			if probeErr != nil {
-				lastProbeErr = probeErr
-			} else {
-				lastProbeErr = nil
-				if exhausted {
-					return developerTaskResult{agent: current, output: latestOutput, quotaExhausted: true}, nil
-				}
+			probe := a.probeDeveloperQuota(ctx, target)
+			a.debugf("watchdog periodic-probe task=%q class=%q reason=%q elapsed=%s", taskID, probe.Class, probe.Reason, elapsed)
+			if probe.Class == quotaLow || probe.Class == quotaExhausted {
+				return developerTaskResult{agent: current, output: latestOutput, quota: probe}, nil
 			}
 			sinceProbe = 0
 		}
+		if stallFor >= stallWindow {
+			a.debugf("watchdog stall-detected task=%q stall=%s elapsed=%s", taskID, stallFor, elapsed)
+			probe := a.probeDeveloperQuota(ctx, target)
+			a.debugf("watchdog stall-probe task=%q class=%q reason=%q", taskID, probe.Class, probe.Reason)
+			switch probe.Class {
+			case quotaLow, quotaExhausted:
+				return developerTaskResult{agent: current, output: latestOutput, quota: probe}, nil
+			case quotaAvailable:
+				return a.cancelHealthyStall(ctx, target, current, checkpoint, task)
+			default:
+				return developerTaskResult{}, fmt.Errorf("agy made no meaningful progress and its quota could not be verified; use recover_task after checking the right pane")
+			}
+		}
 	}
+	a.debugf("watchdog deadline task=%q elapsed=%s", taskID, elapsed)
+	return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes; use recover_task after checking the right pane")
+}
 
-	if lastProbeErr != nil {
-		return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes; quota check failed: %w", lastProbeErr)
+func progressSnapshotFor(checkpoint transcript.Checkpoint, visible, status string) ProgressSnapshot {
+	snapshot := ProgressSnapshot{Visible: visible, CompactOffset: fileSize(checkpoint.Path), FullOffset: fileSize(checkpoint.FullPath), AgentStatus: status}
+	if match := agyBackgroundTasksPattern.FindString(visible); match != "" {
+		_, _ = fmt.Sscanf(match, "%d", &snapshot.BackgroundTasks)
 	}
-	return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes even though quota is available; check the right pane")
+	return snapshot
+}
+
+func fileSize(path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
 }
 
 func (a *App) reportTaskProgress(agent herdr.AgentInfo, elapsed time.Duration) {
@@ -300,108 +347,4 @@ func agyDividerLine(line string) bool {
 		}
 	}
 	return true
-}
-
-func (a *App) agyQuotaExhausted(ctx context.Context) (bool, error) {
-	modelPayload, err := a.runAgySlashCommand(ctx, "/model")
-	if err != nil {
-		return false, fmt.Errorf("read agy model: %w", err)
-	}
-	var model agyModel
-	if err := json.Unmarshal(modelPayload, &model); err != nil {
-		return false, fmt.Errorf("decode agy model: %w", err)
-	}
-	groupName, ok := quotaGroupForModel(model)
-	if !ok {
-		return false, fmt.Errorf("unknown quota group for model %q", firstNonEmpty(model.ID, model.Label))
-	}
-
-	quotaPayload, err := a.runAgySlashCommand(ctx, "/quota")
-	if err != nil {
-		return false, fmt.Errorf("read agy quota: %w", err)
-	}
-	var status agyQuota
-	if err := json.Unmarshal(quotaPayload, &status); err != nil {
-		return false, fmt.Errorf("decode agy quota: %w", err)
-	}
-	return quotaGroupExhausted(status, groupName)
-}
-
-func (a *App) runAgySlashCommand(ctx context.Context, command string) (json.RawMessage, error) {
-	result, err := a.runner.Run(ctx, "agy", "-p", command, "--output-format", "json", "--print-timeout", "30s")
-	if err != nil {
-		return nil, err
-	}
-	if result.ExitCode != 0 {
-		message := strings.TrimSpace(result.Stderr)
-		if message == "" {
-			message = fmt.Sprintf("exit status %d", result.ExitCode)
-		}
-		return nil, fmt.Errorf("%s", message)
-	}
-	var response agyCommandEnvelope
-	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &response); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	if !strings.EqualFold(response.Status, "SUCCESS") {
-		return nil, fmt.Errorf("command status is %q", response.Status)
-	}
-	if len(response.Command.Data) == 0 || string(response.Command.Data) == "null" {
-		return nil, fmt.Errorf("command returned no data")
-	}
-	return response.Command.Data, nil
-}
-
-func quotaGroupForModel(model agyModel) (string, bool) {
-	name := strings.ToLower(model.ID + " " + model.Label)
-	switch {
-	case strings.Contains(name, "gemini"):
-		return "Gemini Models", true
-	case strings.Contains(name, "claude"), strings.Contains(name, "gpt"), strings.Contains(name, "opus"), strings.Contains(name, "sonnet"):
-		return "Claude and GPT models", true
-	default:
-		return "", false
-	}
-}
-
-func quotaGroupExhausted(status agyQuota, expectedGroup string) (bool, error) {
-	for _, group := range status.Groups {
-		if !strings.EqualFold(strings.TrimSpace(group.Name), expectedGroup) {
-			continue
-		}
-		weeklyFound := false
-		fiveHourFound := false
-		for _, bucket := range group.Buckets {
-			if bucket.RemainingFraction == nil {
-				continue
-			}
-			bucketName := strings.ToLower(bucket.ID + " " + bucket.Name)
-			switch {
-			case strings.Contains(bucketName, "weekly"), strings.Contains(bucketName, "week"):
-				weeklyFound = true
-				if *bucket.RemainingFraction <= agyWeeklySwitchThreshold {
-					return true, nil
-				}
-			case strings.Contains(bucketName, "5h"), strings.Contains(bucketName, "5-hour"), strings.Contains(bucketName, "5 hour"):
-				fiveHourFound = true
-				if *bucket.RemainingFraction <= agyFiveHourSwitchThreshold {
-					return true, nil
-				}
-			}
-		}
-		if !weeklyFound || !fiveHourFound {
-			return false, fmt.Errorf("quota group %q does not have readable weekly and 5-hour buckets", expectedGroup)
-		}
-		return false, nil
-	}
-	return false, fmt.Errorf("quota group %q was not found", expectedGroup)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return "unknown"
 }

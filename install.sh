@@ -1,5 +1,5 @@
 #!/bin/sh
-# cagy installer - secure, portable one-command installer for macOS and Linux
+# cagy installer - secure one-command installer for Apple Silicon macOS
 # https://github.com/kazimshah39/cagy
 
 set -eu
@@ -73,37 +73,24 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Detect operating system
+# cagy intentionally supports only Apple Silicon macOS. The Keychain-backed
+# account manager requires Darwin arm64 and cgo; fail before any filesystem
+# mutation when invoked elsewhere.
 OS_RAW="$(uname -s)"
-case "$OS_RAW" in
-  Darwin*)
-    OS="darwin"
-    ;;
-  Linux*)
-    OS="linux"
-    ;;
-  *)
-    echo "Error: Unsupported operating system: ${OS_RAW}." >&2
-    echo "cagy supports macOS and Linux." >&2
-    exit 1
-    ;;
-esac
-
-# Detect architecture
 ARCH_RAW="$(uname -m)"
+if [ "$OS_RAW" != "Darwin" ]; then
+  echo "Error: cagy supports only macOS on Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
+  exit 1
+fi
 case "$ARCH_RAW" in
-  x86_64|amd64)
-    ARCH="amd64"
-    ;;
-  arm64|aarch64)
-    ARCH="arm64"
-    ;;
+  arm64|aarch64) ;;
   *)
-    echo "Error: Unsupported architecture: ${ARCH_RAW}." >&2
-    echo "cagy supports amd64 and arm64." >&2
+    echo "Error: cagy supports only Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
     exit 1
     ;;
 esac
+OS="darwin"
+ARCH="arm64"
 
 # Helper: check Go version (must be >= 1.25)
 check_go() {
@@ -290,7 +277,7 @@ install_from_source() {
   fi
 
   echo "Compiling cagy binary..."
-  CGO_ENABLED=0 go build -C "$SRC_DIR" -trimpath -ldflags "-s -w" -o "$TMP_DIR/cagy" ./cmd/cagy
+  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "$SRC_DIR" -trimpath -ldflags "-s -w" -o "$TMP_DIR/cagy" ./cmd/cagy
 
   if [ ! -f "$TMP_DIR/cagy" ]; then
     echo "Error: Compilation failed to generate cagy binary." >&2

@@ -62,6 +62,7 @@ type DeveloperStatusOutput struct {
 	Status       string `json:"status"`
 	Project      string `json:"project"`
 	SessionReady bool   `json:"session_ready"`
+	RouterReady  bool   `json:"router_ready"`
 	TaskSummary  string `json:"task_summary,omitempty"`
 }
 

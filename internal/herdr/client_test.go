@@ -434,3 +434,15 @@ func TestWaitForAvailableShellTimesOutWithLastForegroundProcess(t *testing.T) {
 		t.Fatalf("error=%v, want timeout with last foreground process", err)
 	}
 }
+
+func TestReportPaneRuntime(t *testing.T) {
+	runner := &fakeRunner{results: []proc.Result{{Stdout: `{"result":{}}`}}}
+	client := New(runner)
+	if err := client.ReportPaneRuntime(context.Background(), "w1:p2", "cagy:pane-owner", "runtime-123", "revision-456"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:pane-owner", "--token", "cagy_runtime_id=runtime-123", "--token", "cagy_build_revision=revision-456"}
+	if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0], want) {
+		t.Fatalf("calls=%#v want=%#v", runner.calls, want)
+	}
+}

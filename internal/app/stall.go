@@ -127,8 +127,8 @@ const (
 	defaultCancellationIdleWait         = 30 * time.Second
 )
 
-// cancelHealthyStall safely interrupts a developer that has healthy quota but
-// made no meaningful progress. It never resubmits the original task. If an
+// cancelHealthyStall safely interrupts a developer that made no meaningful
+// progress. It never resubmits the original task. If an
 // exact final response is already present it is returned; otherwise one short,
 // same-conversation continuation is allowed after cancellation is proven.
 func (a *App) cancelHealthyStall(ctx context.Context, target string, agent herdr.AgentInfo, checkpoint transcript.Checkpoint, task string) (developerTaskResult, error) {

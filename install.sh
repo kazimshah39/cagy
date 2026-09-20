@@ -73,9 +73,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# cagy intentionally supports only Apple Silicon macOS. The Keychain-backed
-# account manager requires Darwin arm64 and cgo; fail before any filesystem
-# mutation when invoked elsewhere.
+# cagy intentionally supports only Apple Silicon macOS. Fail before any
+# filesystem mutation when invoked elsewhere.
 OS_RAW="$(uname -s)"
 ARCH_RAW="$(uname -m)"
 if [ "$OS_RAW" != "Darwin" ]; then

@@ -9,13 +9,11 @@ import (
 	"time"
 
 	"github.com/kazimshah39/cagy/internal/herdr"
-	"github.com/kazimshah39/cagy/internal/quota"
 	"github.com/kazimshah39/cagy/internal/transcript"
 )
 
 const (
 	defaultInitialPromptWait  = 30 * time.Second
-	defaultQuotaProbeInterval = 45 * time.Second
 	defaultHealthyStallWindow = 150 * time.Second
 	defaultHeartbeatInterval  = 5 * time.Minute
 	defaultTaskDeadline       = 30 * time.Minute
@@ -26,14 +24,9 @@ var agyBackgroundTasksPattern = regexp.MustCompile(`\b[1-9][0-9]*\s+(?:tasks?|ta
 type developerTaskResult struct {
 	agent  herdr.AgentInfo
 	output string
-	quota  quotaProbeResult
 }
 
-func (r developerTaskResult) needsQuotaRecovery() bool {
-	return r.quota.Class == quotaLow || r.quota.Class == quotaExhausted
-}
-
-func (a *App) runDeveloperTask(ctx context.Context, target, task, before string, checkpoint transcript.Checkpoint) (developerTaskResult, error) {
+func (a *App) runDeveloperTask(ctx context.Context, target, task string, checkpoint transcript.Checkpoint) (developerTaskResult, error) {
 	taskID := debugTaskFingerprint(task)
 	deadline := a.taskDeadline
 	if deadline <= 0 {
@@ -50,15 +43,6 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 	fmt.Fprintln(a.stderr, "cagy: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
 	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, durationMS(initialWait))
 	a.debugf("watchdog prompt-result task=%q status=%q pane=%q error=%q", taskID, settled.AgentStatus, settled.PaneID, waitErr)
-	after, readErr := a.herdr.ReadAgent(taskCtx, target, 400)
-	if readErr != nil {
-		return developerTaskResult{}, fmt.Errorf("read agy response: %w", readErr)
-	}
-	newOutput := quota.NewOutput(before, after)
-	if quota.DetectedResponse(newOutput, task) {
-		a.debugf("watchdog visible-quota task=%q detected=true", taskID)
-		return developerTaskResult{agent: settled, output: newOutput, quota: quotaProbeResult{Class: quotaExhausted, Reason: "visible provider quota error", ObservedAt: a.now().UTC()}}, nil
-	}
 	if waitErr != nil && !herdr.IsCode(waitErr, "timeout") && !herdr.IsCode(waitErr, "agent_prompt_stalled") {
 		return developerTaskResult{}, waitErr
 	}
@@ -79,27 +63,18 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task, before string,
 		if remaining < 0 {
 			remaining = 0
 		}
-		// A full initial timeout is a useful early signal. Probe once now so a
-		// strong provider quota failure is handled without another delay;
-		// unknown failures never cause an account switch.
-		probe := a.probeDeveloperQuota(taskCtx, target)
-		a.debugf("watchdog early-probe task=%q class=%q reason=%q", taskID, probe.Class, probe.Reason)
-		if probe.Class == quotaLow || probe.Class == quotaExhausted {
-			return developerTaskResult{agent: current, output: newOutput, quota: probe}, nil
-		}
 	}
-	return a.monitorDeveloperTask(taskCtx, target, task, before, checkpoint, current, remaining, nil)
+	return a.monitorDeveloperTask(taskCtx, target, task, checkpoint, current, remaining)
 }
 
 // monitorDeveloperTask requires both a stable real idle footer and the exact
 // transcript response. Herdr idle/done reports alone cannot finish a task.
 func (a *App) monitorDeveloperTask(
 	ctx context.Context,
-	target, task, before string,
+	target, task string,
 	checkpoint transcript.Checkpoint,
 	current herdr.AgentInfo,
 	remaining time.Duration,
-	_ error,
 ) (developerTaskResult, error) {
 	taskID := debugTaskFingerprint(task)
 	poll := a.developerPoll
@@ -114,10 +89,6 @@ func (a *App) monitorDeveloperTask(
 	if missingWait <= 0 {
 		missingWait = 30 * time.Second
 	}
-	probeInterval := a.quotaProbeInterval
-	if probeInterval <= 0 {
-		probeInterval = defaultQuotaProbeInterval
-	}
 	stallWindow := a.healthyStallWindow
 	if stallWindow <= 0 {
 		stallWindow = defaultHealthyStallWindow
@@ -130,14 +101,12 @@ func (a *App) monitorDeveloperTask(
 	idleFor := time.Duration(0)
 	idleWithoutResponse := time.Duration(0)
 	sinceTranscriptCheck := time.Duration(0)
-	sinceProbe := time.Duration(0)
 	sinceHeartbeat := time.Duration(0)
 	stallFor := time.Duration(0)
 	elapsed := time.Duration(0)
-	latestOutput := ""
 	tracker := NewProgressTracker(nil)
 	lastVisibleState := ""
-	a.debugf("watchdog monitor-begin task=%q target=%q remaining=%s poll=%s probe=%s stall=%s", taskID, target, remaining, poll, probeInterval, stallWindow)
+	a.debugf("watchdog monitor-begin task=%q target=%q remaining=%s poll=%s stall=%s", taskID, target, remaining, poll, stallWindow)
 	progressCheckpoint := checkpoint
 	if progressCheckpoint.Path == "" && current.AgentSession != nil {
 		if paths, err := transcript.PathsFor(a.agyBrainRoot, transcript.Ref{Source: current.AgentSession.Source, Agent: current.AgentSession.Agent, Kind: current.AgentSession.Kind, Value: current.AgentSession.Value}); err == nil {
@@ -166,7 +135,6 @@ func (a *App) monitorDeveloperTask(
 
 		remaining -= step
 		elapsed += step
-		sinceProbe += step
 		sinceHeartbeat += step
 		visible, visibleErr := a.herdr.ReadAgentVisible(ctx, target, 80)
 		if visibleErr != nil {
@@ -219,34 +187,9 @@ func (a *App) monitorDeveloperTask(
 			a.reportTaskProgress(current, elapsed)
 			sinceHeartbeat = 0
 		}
-		if sinceProbe >= probeInterval {
-			recent, readErr := a.herdr.ReadAgent(ctx, target, 400)
-			if readErr != nil {
-				return developerTaskResult{}, fmt.Errorf("read agy response: %w", readErr)
-			}
-			latestOutput = quota.NewOutput(before, recent)
-			if quota.DetectedResponse(latestOutput, task) {
-				return developerTaskResult{agent: current, output: latestOutput, quota: quotaProbeResult{Class: quotaExhausted, Reason: "visible provider quota error", ObservedAt: a.now().UTC()}}, nil
-			}
-			probe := a.probeDeveloperQuota(ctx, target)
-			a.debugf("watchdog periodic-probe task=%q class=%q reason=%q elapsed=%s", taskID, probe.Class, probe.Reason, elapsed)
-			if probe.Class == quotaLow || probe.Class == quotaExhausted {
-				return developerTaskResult{agent: current, output: latestOutput, quota: probe}, nil
-			}
-			sinceProbe = 0
-		}
 		if stallFor >= stallWindow {
 			a.debugf("watchdog stall-detected task=%q stall=%s elapsed=%s", taskID, stallFor, elapsed)
-			probe := a.probeDeveloperQuota(ctx, target)
-			a.debugf("watchdog stall-probe task=%q class=%q reason=%q", taskID, probe.Class, probe.Reason)
-			switch probe.Class {
-			case quotaLow, quotaExhausted:
-				return developerTaskResult{agent: current, output: latestOutput, quota: probe}, nil
-			case quotaAvailable:
-				return a.cancelHealthyStall(ctx, target, current, checkpoint, task)
-			default:
-				return developerTaskResult{}, fmt.Errorf("agy made no meaningful progress and its quota could not be verified; use recover_task after checking the right pane")
-			}
+			return a.cancelHealthyStall(ctx, target, current, checkpoint, task)
 		}
 	}
 	a.debugf("watchdog deadline task=%q elapsed=%s", taskID, elapsed)

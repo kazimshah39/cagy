@@ -485,7 +485,7 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 	_ = a.herdr.RenamePane(ctx, pane.PaneID, developerPaneLabel)
 	var developer herdr.AgentInfo
 	// Repair uses agy's current session directly. It must not touch the
-	// canonical Keychain item because that can show a macOS password prompt.
+	// external credential stores; cagy never changes provider credentials.
 	if sessionID != "" {
 		developer, err = a.herdr.StartAgyWithSession(ctx, info.developer, pane.PaneID, sessionID)
 	} else {
@@ -496,7 +496,7 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 	}
 	a.debugf("lifecycle repair start-result developer=%q pane=%q agent_started=%t error=%q", info.developer, pane.PaneID, developer.PaneID != "", err)
 	if err != nil && developer.PaneID != "" {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, pane.PaneID, fmt.Errorf("bind repaired agy developer account: %w", err))
+		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, pane.PaneID, fmt.Errorf("prepare repaired agy developer: %w", err))
 	}
 	if err != nil {
 		if herdr.IsCode(err, "agent_name_taken") {
@@ -578,168 +578,6 @@ func (a *App) findRepairPane(ctx context.Context, info runtimeContext, superviso
 	}
 	a.debugf("lifecycle repair-pane-search none developer=%q panes_seen=%d", info.developer, len(panes))
 	return herdr.PaneInfo{}, nil
-}
-
-// startDeveloperInPlace starts agy in an already-stopped, cagy-owned pane.
-// A non-empty sessionID resumes that exact conversation; an empty sessionID
-// creates a fresh conversation. Account recovery uses this only after the
-// previous developer has been confirmed released.
-func (a *App) startDeveloperInPlace(ctx context.Context, info runtimeContext, paneID, sessionID string) (herdr.AgentInfo, error) {
-	a.debugf("lifecycle start-in-place begin developer=%q pane=%q resume=%t", info.developer, paneID, sessionID != "")
-	supervisor, err := a.supervisorPane(ctx, info)
-	if err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	pane, err := a.herdr.GetPane(ctx, paneID)
-	if err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("read developer pane before restart: %w", err)
-	}
-	if err := validatePaneScope(pane, info, supervisor); err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("developer pane is unsafe before restart: %w", err)
-	}
-	if pane.Agent != "" {
-		return herdr.AgentInfo{}, fmt.Errorf("developer pane is not an available shell")
-	}
-	if err := a.validateShellPane(ctx, paneID); err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, err
-	}
-
-	var started herdr.AgentInfo
-	if sessionID != "" {
-		if !agyConversationIDPattern.MatchString(sessionID) {
-			return herdr.AgentInfo{}, errors.New("agy conversation identity is invalid")
-		}
-		started, err = a.herdr.StartAgyWithSession(ctx, info.developer, paneID, sessionID)
-	} else {
-		started, err = a.herdr.StartAgy(ctx, info.developer, paneID)
-	}
-	if err != nil {
-		cleanupErr := a.cleanupFailedAgentStart(ctx, info, paneID)
-		_ = a.markRepairPane(ctx, info, paneID)
-		if cleanupErr != nil {
-			return herdr.AgentInfo{}, fmt.Errorf("start agy in developer pane: %w; cleanup failed: %v", err, cleanupErr)
-		}
-		return herdr.AgentInfo{}, fmt.Errorf("start agy in developer pane: %w", err)
-	}
-	if sessionID != "" {
-		if err := validateAgySessionContinuity(sessionID, started); err != nil {
-			return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-		}
-	}
-	if err := validateDeveloperSession(started, info, supervisor); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	_ = a.herdr.RenamePane(ctx, paneID, developerPaneLabel)
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if sessionID != "" {
-		if err := a.persistDeveloperSession(ctx, paneID, started); err != nil {
-			return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-		}
-	} else if err := a.recordFreshDeveloperSessionState(ctx, started); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := a.ensureAgyReady(ctx, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, fmt.Errorf("prepare restarted agy: %w", err))
-	}
-	a.debugf("lifecycle start-in-place success developer=%q pane=%q status=%q resume=%t", info.developer, started.PaneID, started.AgentStatus, sessionID != "")
-	return started, nil
-}
-
-func (a *App) restartFreshDeveloperInPlace(ctx context.Context, info runtimeContext, developer herdr.AgentInfo) (herdr.AgentInfo, error) {
-	a.debugf("lifecycle restart-fresh begin developer=%q pane=%q", info.developer, developer.PaneID)
-	supervisor, err := a.supervisorPane(ctx, info)
-	if err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	identity, err := a.developerRecoveryIdentityInScope(ctx, info, supervisor, developer, true)
-	if err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("recheck fresh agy session before restart: %w", err)
-	}
-	if !identity.pending {
-		return herdr.AgentInfo{}, fmt.Errorf("agy conversation appeared before fresh restart; developer was kept")
-	}
-	developer = identity.agent
-	paneID := developer.PaneID
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	if err := a.interruptAndWaitAgent(ctx, info.developer); err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("stop quota-limited fresh developer: %w", err)
-	}
-
-	restarted, err := a.herdr.StartAgy(ctx, info.developer, paneID)
-	if err != nil {
-		_ = a.markRepairPane(ctx, info, paneID)
-		return herdr.AgentInfo{}, fmt.Errorf("restart fresh agy in developer pane: %w; next ask will retry repair", err)
-	}
-	if err := validateDeveloperSession(restarted, info, supervisor); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	_ = a.herdr.RenamePane(ctx, paneID, developerPaneLabel)
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := a.recordFreshDeveloperSessionState(ctx, restarted); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := a.ensureAgyReady(ctx, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, fmt.Errorf("prepare restarted fresh agy: %w", err))
-	}
-	a.debugf("lifecycle restart-fresh success developer=%q pane=%q status=%q", info.developer, restarted.PaneID, restarted.AgentStatus)
-	return restarted, nil
-}
-
-func (a *App) restartDeveloperInPlace(ctx context.Context, info runtimeContext, developer herdr.AgentInfo) (herdr.AgentInfo, error) {
-	a.debugf("lifecycle restart-resume begin developer=%q pane=%q has_session=%t", info.developer, developer.PaneID, developer.AgentSession != nil && strings.TrimSpace(developer.AgentSession.Value) != "")
-	supervisor, err := a.supervisorPane(ctx, info)
-	if err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	identity, err := a.developerRecoveryIdentityInScope(ctx, info, supervisor, developer, false)
-	if err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("recheck agy conversation before restart: %w", err)
-	}
-	developer = identity.agent
-	sessionID, err := exactAgySessionID(developer)
-	if err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("cannot restart agy safely: %w", err)
-	}
-	paneID := developer.PaneID
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, err
-	}
-	if err := a.interruptAndWaitAgent(ctx, info.developer); err != nil {
-		return herdr.AgentInfo{}, fmt.Errorf("stop quota-limited developer: %w", err)
-	}
-
-	resumed, err := a.herdr.StartAgyWithSession(ctx, info.developer, paneID, sessionID)
-	if err != nil {
-		_ = a.markRepairPane(ctx, info, paneID)
-		return herdr.AgentInfo{}, fmt.Errorf("restart agy in developer pane: %w; next ask will retry repair", err)
-	}
-	if err := validateAgySessionContinuity(sessionID, resumed); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := validateDeveloperSession(resumed, info, supervisor); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	_ = a.herdr.RenamePane(ctx, paneID, developerPaneLabel)
-	if err := a.markDeveloperPane(ctx, info, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := a.persistDeveloperSession(ctx, paneID, resumed); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, err)
-	}
-	if err := a.ensureAgyReady(ctx, paneID); err != nil {
-		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, paneID, fmt.Errorf("prepare restarted agy: %w", err))
-	}
-	a.debugf("lifecycle restart-resume success developer=%q pane=%q status=%q", info.developer, resumed.PaneID, resumed.AgentStatus)
-	return resumed, nil
 }
 
 func (a *App) interruptAndWaitAgent(ctx context.Context, target string) error {

@@ -34,16 +34,9 @@ type taskPhase string
 const (
 	taskPhaseSubmitting taskPhase = "submitting"
 	taskPhaseMonitoring taskPhase = "monitoring"
-	taskPhaseRecovering taskPhase = "recovering"
 	taskPhaseBlocked    taskPhase = "blocked"
 	taskPhaseCompleted  taskPhase = "completed_unacknowledged"
 	taskPhaseUncertain  taskPhase = "uncertain"
-
-	taskFailureQuotaRecoveryStopTimeout   = "quota_recovery_stop_timeout"
-	taskFailureQuotaRecoveryStopFailed    = "quota_recovery_stop_failed"
-	taskFailureQuotaAccountsUnavailable   = "quota_accounts_unavailable"
-	taskFailureQuotaRefreshUnavailable    = "quota_refresh_unavailable"
-	taskFailureQuotaOriginalRestoreFailed = "quota_original_restore_failed"
 )
 
 type taskJournal struct {
@@ -60,8 +53,6 @@ type taskJournal struct {
 	TaskHash            string    `json:"task_sha256"`
 	Phase               taskPhase `json:"phase"`
 	DeliveryReceipt     string    `json:"delivery_receipt,omitempty"`
-	FailureCode         string    `json:"failure_code,omitempty"`
-	FailureAt           time.Time `json:"failure_at,omitempty"`
 	StartedAt           time.Time `json:"started_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }
@@ -225,10 +216,6 @@ func (a *App) replaceTrackedPrompt(developer herdr.AgentInfo, task string, check
 	a.activeTask.CompactOffset = checkpoint.Offset
 	a.activeTask.FullOffset = checkpoint.FullOffset
 	a.activeTask.Phase = phase
-	if phase != taskPhaseUncertain {
-		a.activeTask.FailureCode = ""
-		a.activeTask.FailureAt = time.Time{}
-	}
 	if sessionID, err := exactAgySessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
@@ -264,10 +251,6 @@ func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error 
 	}
 	previous := a.activeTask.Phase
 	a.activeTask.Phase = phase
-	if phase != taskPhaseUncertain {
-		a.activeTask.FailureCode = ""
-		a.activeTask.FailureAt = time.Time{}
-	}
 	if phase == taskPhaseCompleted && a.activeTask.DeliveryReceipt == "" {
 		receipt, err := randomDeliveryReceipt()
 		if err != nil {
@@ -279,9 +262,6 @@ func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error 
 		a.activeTask.DeveloperPaneID = developer.PaneID
 	}
 	// Only update SessionID when the incoming developer has a valid session.
-	// This preserves a resumed session identity already written by
-	// replaceTrackedPrompt during quota recovery, which may be more recent
-	// than the developer value captured before recovery began.
 	if sessionID, err := exactAgySessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
@@ -297,40 +277,10 @@ func (a *App) warnTrackedPhase(phase taskPhase, developer herdr.AgentInfo) {
 	}
 }
 
-func (a *App) setTrackedFailure(code string, developer herdr.AgentInfo) error {
-	if a.activeTask == nil {
-		a.debugf("task-tracking failure skipped code=%q reason=%q", code, "no-active-task")
-		return nil
-	}
-	a.activeTask.FailureCode = code
-	a.activeTask.FailureAt = a.now().UTC()
-	return a.setTrackedPhase(taskPhaseUncertain, developer)
-}
-
-func (a *App) warnTrackedFailure(code string, developer herdr.AgentInfo) {
-	if err := a.setTrackedFailure(code, developer); err != nil {
-		fmt.Fprintf(a.stderr, "cagy warning: could not save task failure state: %v\n", err)
-	}
-}
-
-func taskFailureMessage(code string) string {
-	switch code {
-	case taskFailureQuotaRecoveryStopTimeout:
-		return "agy quota was exhausted; cagy could not confirm that the developer exited after bounded interrupts, so account rotation stopped safely"
-	case taskFailureQuotaRecoveryStopFailed:
-		return "agy quota was exhausted; cagy could not stop the developer safely, so account rotation did not continue"
-	case taskFailureQuotaAccountsUnavailable:
-		return "agy quota was exhausted and no healthy stored account was available; the original developer remains available"
-	case taskFailureQuotaRefreshUnavailable:
-		return "agy quota was exhausted and stored account refresh was temporarily unavailable; the unchanged original developer was restored"
-	case taskFailureQuotaOriginalRestoreFailed:
-		return "agy quota was exhausted, no healthy stored account was available, and the original developer could not be restored"
-	default:
-		return "developer is no longer visibly working, but no complete matching final response is available"
-	}
-}
-
 func validateTaskJournal(record taskJournal, info runtimeContext) error {
+	if record.Phase == "recovering" {
+		record.Phase = taskPhaseUncertain
+	}
 	if record.Version != 1 && record.Version != 2 && record.Version != 3 {
 		return fmt.Errorf("unsupported interrupted-task state version %d", record.Version)
 	}
@@ -364,31 +314,13 @@ func validateTaskJournal(record taskJournal, info runtimeContext) error {
 	if record.DeliveryReceipt != "" && !isValidDeliveryReceipt(record.DeliveryReceipt) {
 		return fmt.Errorf("interrupted-task state has an invalid delivery receipt")
 	}
-	if record.FailureCode != "" {
-		switch record.FailureCode {
-		case taskFailureQuotaRecoveryStopTimeout, taskFailureQuotaRecoveryStopFailed, taskFailureQuotaAccountsUnavailable, taskFailureQuotaRefreshUnavailable, taskFailureQuotaOriginalRestoreFailed:
-		default:
-			return fmt.Errorf("interrupted-task state has an invalid failure code")
-		}
-		if record.FailureAt.IsZero() {
-			return fmt.Errorf("interrupted-task state has a failure code without a timestamp")
-		}
-		if record.Phase != taskPhaseUncertain {
-			return fmt.Errorf("interrupted-task state has a failure outside the uncertain phase")
-		}
-	} else if !record.FailureAt.IsZero() {
-		return fmt.Errorf("interrupted-task state has a failure timestamp without a code")
-	}
 	switch record.Phase {
-	case taskPhaseSubmitting, taskPhaseMonitoring, taskPhaseRecovering, taskPhaseBlocked, taskPhaseCompleted, taskPhaseUncertain:
+	case taskPhaseSubmitting, taskPhaseMonitoring, taskPhaseBlocked, taskPhaseCompleted, taskPhaseUncertain:
 	default:
 		return fmt.Errorf("interrupted-task state has an invalid phase %q", record.Phase)
 	}
 	if record.StartedAt.IsZero() || record.UpdatedAt.IsZero() || record.UpdatedAt.Before(record.StartedAt) {
 		return fmt.Errorf("interrupted-task state has invalid timestamps")
-	}
-	if !record.FailureAt.IsZero() && (record.FailureAt.Before(record.StartedAt) || record.FailureAt.After(record.UpdatedAt)) {
-		return fmt.Errorf("interrupted-task state has an invalid failure timestamp")
 	}
 	return nil
 }
@@ -522,9 +454,6 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 		if responseState.Found && record.Phase == taskPhaseCompleted {
 			return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
 		}
-		if record.FailureCode != "" {
-			return taskInspection{kind: taskInspectionUncertain, message: taskFailureMessage(record.FailureCode) + "; developer is not running"}, nil
-		}
 		return taskInspection{kind: taskInspectionUncertain, message: "developer is no longer running; inspect the saved task state before forgetting it"}, nil
 	}
 	if responseState.Found && record.Phase == taskPhaseCompleted {
@@ -543,13 +472,8 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 	if devRunning {
 		return taskInspection{kind: taskInspectionRunning, developerRunning: true, message: "task is still running in the visible developer pane"}, nil
 	}
-	// A failed recovery can leave a stale transcript background marker even
-	// after the verified developer has returned to an idle TUI. The durable
-	// uncertain phase is stronger than that stale marker when there is no live
-	// working signal, so report the saved failure instead of claiming the task
-	// is still running.
 	if record.Phase == taskPhaseUncertain {
-		return taskInspection{kind: taskInspectionUncertain, message: taskFailureMessage(record.FailureCode)}, nil
+		return taskInspection{kind: taskInspectionUncertain, message: "the previous task ended without a complete matching response"}, nil
 	}
 	if responseState.BackgroundPending || responseState.AwaitingResponse {
 		return taskInspection{kind: taskInspectionRunning, developerRunning: false, message: "task is still running in the visible developer pane"}, nil
@@ -559,9 +483,6 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 	}
 	if record.Phase == taskPhaseBlocked {
 		return taskInspection{kind: taskInspectionBlocked, message: "task was blocked; check the right pane"}, nil
-	}
-	if record.Phase == taskPhaseRecovering {
-		return taskInspection{kind: taskInspectionUncertain, message: "the previous caller stopped during quota recovery; inspect the recovery and developer panes"}, nil
 	}
 	if sessionID == "" {
 		return taskInspection{kind: taskInspectionUncertain, message: "agy has not reported a conversation ID, so the result cannot be matched safely"}, nil
@@ -783,8 +704,6 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 		status := "running"
 		if record.Phase == taskPhaseSubmitting {
 			status = "submitting"
-		} else if record.Phase == taskPhaseRecovering {
-			status = "recovering"
 		}
 		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q", info.developer, debugHashPrefix(record.TaskHash), status, elapsed)
 		return &TaskStatusOutput{

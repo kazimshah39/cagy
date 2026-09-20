@@ -30,7 +30,7 @@ go vet ./...
 go build ./cmd/cagy
 ```
 
-Automated tests must use fake process runners, fake Keychain adapters, and local fixtures. They must not launch real Codex or agy sessions, consume model quota, or switch a real account. The supported target is macOS Apple Silicon (`darwin/arm64`); do not add Linux, Windows, or Intel-only release targets.
+Automated tests must use fake process runners and local fixtures. They must not launch real Codex or agy sessions, configure 9Router, consume model quota, or switch a real provider account. The supported target is macOS Apple Silicon (`darwin/arm64`); do not add Linux, Windows, or Intel-only release targets.
 
 ## Pull requests
 

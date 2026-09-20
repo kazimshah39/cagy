@@ -182,20 +182,20 @@ func (c *Client) ReportPaneOwnership(ctx context.Context, paneID, source, owner,
 	)
 }
 
+// ReportPaneRuntime records the runtime that owns a cagy supervisor/developer pane.
+func (c *Client) ReportPaneRuntime(ctx context.Context, paneID, source, runtimeID, buildRevision string) error {
+	if strings.TrimSpace(runtimeID) == "" {
+		return fmt.Errorf("cagy runtime ID is required")
+	}
+	if strings.TrimSpace(buildRevision) == "" {
+		buildRevision = "unknown"
+	}
+	return c.json(ctx, nil, "pane", "report-metadata", paneID, "--source", source, "--token", "cagy_runtime_id="+runtimeID, "--token", "cagy_build_revision="+buildRevision)
+}
+
 // ReportPaneSession persists the exact agy conversation identity independently
 // of the running process. It lets a later repair resume this session instead
 // of guessing which conversation is most recent.
-// ReportPaneAccount records only an opaque cagy account ID for the managed developer pane.
-func (c *Client) ReportPaneAccount(ctx context.Context, paneID, source, accountID string) error {
-	if strings.TrimSpace(accountID) == "" {
-		return fmt.Errorf("agy account ID is required")
-	}
-	return c.json(ctx, nil,
-		"pane", "report-metadata", paneID,
-		"--source", source,
-		"--token", "cagy_account_id="+accountID,
-	)
-}
 
 func (c *Client) ReportPaneSession(ctx context.Context, paneID, source, sessionID string) error {
 	return c.json(ctx, nil,

@@ -10,11 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kazimshah39/cagy/internal/accounts"
+	buildmeta "github.com/kazimshah39/cagy/internal/buildinfo"
 	"github.com/kazimshah39/cagy/internal/herdr"
 	"github.com/kazimshah39/cagy/internal/platform"
 	proc "github.com/kazimshah39/cagy/internal/process"
-	"github.com/kazimshah39/cagy/internal/transcript"
 )
 
 const (
@@ -28,6 +27,9 @@ const (
 	compactSupervisorDisplayName  = "cagy"
 	expandedSupervisorDisplayName = "cagy Supervisor"
 	developerDisplayName          = "cagy Developer"
+	runtimeIDEnv                  = "CAGY_RUNTIME_ID"
+	runtimeIDToken                = "cagy_runtime_id"
+	buildRevisionToken            = "cagy_build_revision"
 )
 
 const supervisorPrompt = `You are the Codex supervisor. The visible agy agent in the right Herdr pane is the developer.
@@ -36,50 +38,41 @@ Delegate implementation work using the native cagy MCP tools. Follow this exact 
 2. Delegate the task with delegate_task(task="..."). Task text is sent literally without shell interpolation.
 3. Review the developer's changes, test execution, correctness, and security.
 4. Call acknowledge_task(receipt="...") only after the result is received and in context.
-5. Account quota failover is automatic. Do not ask the user to switch accounts; wait for cagy to rotate accounts and continue.
+5. 9Router owns provider accounts and quota fallback. Do not ask the user to switch accounts or restart agy after a quota event; report a visible provider failure only after 9Router has exhausted its configured fallback.
 6. If a session or tool call is interrupted, use recover_task to retrieve the completed answer without resubmitting.
 Shell CLI commands (such as cagy ask --stdin) are for emergency and manual compatibility only; always prefer the native MCP tools. Do not edit the same files while agy is working. Use current official web documentation for dependencies and external APIs. Give the final result to the user in clear, simple words.`
 
 // App owns command parsing and the fixed cagy workflow.
 type App struct {
-	runner                 proc.Runner
-	herdr                  *herdr.Client
-	stdin                  io.Reader
-	stdout                 io.Writer
-	stderr                 io.Writer
-	getenv                 func(string) string
-	environ                func() []string
-	stateDir               string
-	activeTask             *taskJournal
-	token                  func() (string, error)
-	now                    func() time.Time
-	agyBrainRoot           string
-	transcriptWait         time.Duration
-	missingTranscriptWait  time.Duration
-	developerPoll          time.Duration
-	initialPromptWait      time.Duration
-	quotaProbeInterval     time.Duration
-	healthyStallWindow     time.Duration
-	heartbeatInterval      time.Duration
-	taskDeadline           time.Duration
-	cancellationIdleWait   time.Duration
-	agentStopTimeout       time.Duration
-	agentStopEscalation    time.Duration
-	configureSidebar       func(context.Context, bool) error
-	resolveExecutable      func() (string, error)
-	checkPlatform          func() error
-	accountsFactory        func() (*accounts.AccountService, error)
-	readPassphrase         func(bool) ([]byte, error)
-	accountLogin           func(context.Context, func(string) error) ([]byte, error)
-	openURL                func(context.Context, string) error
-	recoveryStop           func(context.Context, string) error
-	recoveryStart          func(context.Context, runtimeContext, string, string) (herdr.AgentInfo, error)
-	recoveryProbe          func(context.Context, string) quotaProbeResult
-	recoveryRunTask        func(context.Context, string, string, transcript.Checkpoint) (developerTaskResult, error)
-	recoveryCheckpoint     func(herdr.AgentInfo) (transcript.Checkpoint, error)
-	recoveryBind           func(context.Context, string, string, string) error
-	recoveryCurrentAccount func(context.Context, runtimeContext, herdr.AgentInfo, accounts.Catalog) (string, error)
-	diagnosticSink         func(string)
+	runner                proc.Runner
+	herdr                 *herdr.Client
+	stdin                 io.Reader
+	stdout                io.Writer
+	stderr                io.Writer
+	getenv                func(string) string
+	environ               func() []string
+	stateDir              string
+	activeTask            *taskJournal
+	token                 func() (string, error)
+	now                   func() time.Time
+	agyBrainRoot          string
+	transcriptWait        time.Duration
+	missingTranscriptWait time.Duration
+	developerPoll         time.Duration
+	initialPromptWait     time.Duration
+	healthyStallWindow    time.Duration
+	heartbeatInterval     time.Duration
+	taskDeadline          time.Duration
+	cancellationIdleWait  time.Duration
+	agentStopTimeout      time.Duration
+	agentStopEscalation   time.Duration
+	configureSidebar      func(context.Context, bool) error
+	resolveExecutable     func() (string, error)
+	checkPlatform         func() error
+	runningBuild          func() buildmeta.Identity
+	installedBuild        func(string) (buildmeta.Identity, error)
+	routerCheck           func(context.Context) error
+	diagnosticSink        func(string)
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
@@ -100,7 +93,6 @@ func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 		missingTranscriptWait: 30 * time.Second,
 		developerPoll:         time.Second,
 		initialPromptWait:     30 * time.Second,
-		quotaProbeInterval:    45 * time.Second,
 		healthyStallWindow:    150 * time.Second,
 		heartbeatInterval:     5 * time.Minute,
 		taskDeadline:          30 * time.Minute,
@@ -108,21 +100,10 @@ func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 		agentStopTimeout:      15 * time.Second,
 		agentStopEscalation:   1500 * time.Millisecond,
 		checkPlatform:         platform.Current,
-		readPassphrase:        readPassphraseFromTerminal,
+		runningBuild:          buildmeta.Running,
+		installedBuild:        buildmeta.ReadFile,
 	}
 	herdrClient.SetDiagnostic(application.debugf)
-	googleLogin := accounts.GoogleOAuthLogin{}
-	application.accountLogin = googleLogin.Login
-	application.openURL = func(ctx context.Context, target string) error {
-		result, err := runner.Run(ctx, "open", target)
-		if err != nil {
-			return err
-		}
-		if result.ExitCode != 0 {
-			return fmt.Errorf("open command exited with status %d", result.ExitCode)
-		}
-		return nil
-	}
 	application.resolveExecutable = func() (string, error) {
 		return resolveExecutable(os.Executable)
 	}
@@ -165,6 +146,8 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 			return fmt.Errorf("usage: cagy doctor")
 		}
 		return a.doctor(ctx)
+	case "accounts":
+		return fmt.Errorf("cagy accounts was removed; configure provider accounts and fallback in 9Router")
 	case "ask":
 		if len(args) == 2 {
 			switch args[1] {
@@ -190,8 +173,6 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 			return fmt.Errorf("unknown cagy ask option: %s", args[1])
 		}
 		return a.ask(ctx, strings.Join(args[1:], " "))
-	case "accounts":
-		return a.accountsCommand(ctx, args[1:])
 	case "mcp-server":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cagy mcp-server")
@@ -238,7 +219,6 @@ Usage:
   cagy --show-agents [DIRECTORY]
   cagy doctor
   cagy stop
-  cagy accounts --help
 
 Compatibility and emergency fallback command:
   cagy ask --stdin

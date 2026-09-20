@@ -12,4 +12,6 @@ If private vulnerability reporting is unavailable, open a minimal public issue a
 
 ## Sensitive data
 
-cagy must never log or expose OAuth tokens, refresh tokens, API keys, Keychain contents, complete environment dumps, account-backup passphrases, or full private agent transcripts. For this personal-Mac, simplicity-first setup, cagy account snapshots are stored as private `0600` files inside cagy's `0700` state directory so normal startup never requires Keychain approval. agy continues to own its canonical `gemini` Keychain session, and cagy never rewrites that item's access permissions. Account catalog metadata, diagnostics, and encrypted exports must never expose tokens. Do not use this convenience design on a shared or high-security Mac.
+cagy must never log or expose provider OAuth tokens, refresh tokens, 9Router API keys or CLI tokens, Keychain contents, complete environment dumps, task text, final answers, or full private agent transcripts. cagy does not read, store, import, refresh, or rotate provider credentials; 9Router owns provider authentication and account fallback.
+
+Cagy keeps only private runtime records and interrupted-task journals in its state directory. They contain pane/session identifiers, task hashes, transcript offsets, timestamps, and delivery receipts—never provider credentials, 9Router secrets, task plaintext, or transcript content.

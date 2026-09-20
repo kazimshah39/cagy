@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,8 +24,15 @@ import (
 const (
 	googleClientIDEnv     = "CAGY_GOOGLE_CLIENT_ID"
 	googleClientSecretEnv = "CAGY_GOOGLE_CLIENT_SECRET"
-	googleAuthURL         = "https://accounts.google.com/o/oauth2/v2/auth"
-	googleTokenURL        = "https://oauth2.googleapis.com/token"
+
+	// Installed-app OAuth credentials cannot be kept confidential. CAGY therefore
+	// discovers the same public client used by the locally installed agy binary
+	// instead of copying that client material into source control. Environment
+	// values remain optional overrides for controlled testing or client rotation.
+	maxAgyBinaryBytes = 512 << 20
+
+	googleAuthURL  = "https://accounts.google.com/o/oauth2/v2/auth"
+	googleTokenURL = "https://oauth2.googleapis.com/token"
 )
 
 var agyGoogleScopes = []string{
@@ -220,13 +230,68 @@ func (l GoogleOAuthLogin) Login(ctx context.Context, openURL func(string) error)
 	return encoded, nil
 }
 
+var (
+	agyOAuthClientLookup      = discoverAgyOAuthClient
+	googleClientIDPattern     = regexp.MustCompile(`[0-9]{10,}-[a-z0-9-]+\.apps\.googleusercontent\.com`)
+	googleClientSecretPattern = regexp.MustCompile(`GOCSPX-[A-Za-z0-9_-]{20,}`)
+)
+
 func googleOAuthClientConfig(clientID, clientSecret string) (string, string, error) {
 	clientID = firstNonEmptyString(clientID, os.Getenv(googleClientIDEnv))
 	clientSecret = firstNonEmptyString(clientSecret, os.Getenv(googleClientSecretEnv))
 	if clientID == "" || clientSecret == "" {
-		return "", "", fmt.Errorf("Google OAuth is not configured; set %s and %s before running cagy accounts add or refreshing accounts", googleClientIDEnv, googleClientSecretEnv)
+		discoveredID, discoveredSecret, err := agyOAuthClientLookup()
+		if err == nil {
+			clientID = firstNonEmptyString(clientID, discoveredID)
+			clientSecret = firstNonEmptyString(clientSecret, discoveredSecret)
+		}
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", errors.New("Google OAuth client configuration is unavailable")
 	}
 	return clientID, clientSecret, nil
+}
+
+func discoverAgyOAuthClient() (string, string, error) {
+	path, err := exec.LookPath("agy")
+	if err != nil {
+		return "", "", errors.New("agy executable was not found")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", "", errors.New("agy executable could not be inspected")
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxAgyBinaryBytes {
+		return "", "", errors.New("agy executable has an unsupported size")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", errors.New("agy executable could not be opened")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxAgyBinaryBytes+1))
+	if err != nil || int64(len(data)) > maxAgyBinaryBytes {
+		return "", "", errors.New("agy executable could not be read")
+	}
+	clientID, clientSecret, extractErr := extractAgyOAuthClient(data)
+	clearOAuthDiscoveryBytes(data)
+	return clientID, clientSecret, extractErr
+}
+
+func extractAgyOAuthClient(data []byte) (string, string, error) {
+	clientID := string(googleClientIDPattern.Find(data))
+	clientSecret := string(googleClientSecretPattern.Find(data))
+	if clientID == "" || clientSecret == "" {
+		return "", "", errors.New("agy executable does not contain a compatible OAuth client")
+	}
+	return clientID, clientSecret, nil
+}
+
+// Keep the extracted byte slice short-lived and make accidental reuse harder.
+func clearOAuthDiscoveryBytes(data []byte) {
+	for index := range data {
+		data[index] = 0
+	}
 }
 
 func randomOAuthState() (string, error) {

@@ -1,7 +1,7 @@
 # cagy Project Structure
 
 **Status:** Implemented and tested
-**Date:** 2026-09-18
+**Date:** 2026-09-20
 
 ## Purpose
 
@@ -101,7 +101,7 @@ Build dependency:
 
 - Go 1.25 or newer (required for source builds; the official MCP Go SDK v1.8.0 requires Go 1.25)
 
-cagy does not depend on any external account manager. It stores imported or explicitly added account snapshots in private atomic 0600 files and non-secret metadata in private atomic files. `cagy accounts add` uses an explicit loopback Google OAuth flow with PKCE and writes only to that local vault; it does not change agy's active session. Normal startup, repair, doctor, and quota monitoring leave agy's canonical Keychain item under agy's control. Confirmed quota recovery automatically stops the verified developer, refreshes and validates the selected local credential, replaces the canonical item through the AGM-compatible `security` delete-and-add allow-all flow, restarts agy in the same pane, and live-probes quota. This avoids legacy ACL password dialogs and never opens OAuth. Account commands and metadata-only exports show full labels and email addresses for this personal-machine workflow; credential material and OAuth tokens remain excluded. Explicit manual switching uses the same activation transaction but is an emergency/admin command rather than the normal recovery path.
+cagy does not depend on any external account manager. It stores imported or explicitly added account snapshots in private atomic 0600 files and non-secret metadata in private atomic files. `cagy accounts add` uses an explicit loopback Google OAuth flow with PKCE and writes only to that local vault; it does not change agy's active session. CAGY includes agy's public installed-app OAuth identifiers because stored agy refresh tokens are tied to that native client; environment values are optional compatible overrides, not required runtime setup. Normal startup, repair, doctor, and quota monitoring leave agy's canonical Keychain item under agy's control. Confirmed quota recovery automatically stops the verified developer, refreshes and validates the selected local credential, replaces the canonical item through the AGM-compatible `security` delete-and-add allow-all flow, restarts agy in the same pane, and live-probes quota. This avoids legacy ACL password dialogs and never opens OAuth. Account commands and metadata-only exports show full labels and email addresses for this personal-machine workflow; credential material and OAuth tokens remain excluded. Explicit manual switching uses the same activation transaction but is an emergency/admin command rather than the normal recovery path.
 
 ## Start Flow
 
@@ -159,11 +159,11 @@ Normal completion is ordered deliberately:
 3. Write the final answer to stdout and check the write result.
 4. Remove the journal only after stdout succeeds.
 
-After caller loss, `cagy doctor` reconciles the journal without mutating panes. `cagy ask --recover` hashes transcript user events after the saved offsets and returns only the exact matching final planner response. `cagy ask --forget` is the explicit escape hatch for corrupt or unrecoverable state and refuses while the developer is visibly working. New work is never sent while unresolved state exists.
+After caller loss, `cagy doctor` reconciles the journal without mutating panes. The current journal also records safe quota-recovery failure codes and timestamps, never raw provider errors. Live working state has highest priority. When the verified developer is idle, a durable uncertain recovery state has priority over stale transcript background-task markers, preventing a stopped task from being reported as running. `cagy ask --recover` hashes transcript user events after the saved offsets and returns only the exact matching final planner response. `cagy ask --forget` is the explicit escape hatch for corrupt or unrecoverable state and refuses while the developer is visibly working. New work is never sent while unresolved state exists.
 
 The normal supervisor path uses the native cagy MCP tools (`delegate_task`, `task_status`, `recover_task`, `acknowledge_task`). Tasks arrive through structured JSON inputs, never through shell command strings. Shell CLI commands (`cagy ask --stdin`, `--recover`, `--forget`) remain available for emergency, scripting, and manual compatibility use.
 
-Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge. Stop sends one interrupt, waits briefly, then sends a second interrupt automatically if agy is still registered; this handles agy’s cancel-then-exit behavior in one command.
+Because the MCP bridge configuration is injected per-invocation when launching Codex, any already-running Codex supervisor sessions must be restarted (`cagy stop` followed by `cagy`) to receive the per-invocation MCP bridge. Stop uses three bounded stages: one interrupt and a short wait, a second interrupt and the normal stop wait, then one final interrupt and normal wait only if Herdr still reports agy registered. This handles busy sessions where the first presses cancel background work and the active turn before the idle TUI exits.
 
 A delivery receipt is returned by `delegate_task` and `recover_task`. Codex must call `acknowledge_task` with the matching receipt to clear completed state. The journal persists as `completed_unacknowledged` until the receipt is acknowledged, so a restarted session can recover the exact answer without resubmitting the task.
 
@@ -195,7 +195,7 @@ The active model chooses either `Gemini Models` or `Claude and GPT models`. The 
 
 ## Persistent Account Rotation
 
-The account catalog stores a non-secret rotation order of stable account IDs, a cursor identifying the last attempted/selected account, and its update time. Legacy catalogs are normalized deterministically with the current default first, followed by existing account order. New accounts append; removals preserve the logical circular successor. Both delegated-task recovery and `cagy accounts switch --auto` use the same health-filtered round-robin engine. Each cycle makes one bounded pass, advances the cursor for every attempt, live-probes each candidate after identity validation, and wraps on a later cycle. `switch --auto` is a foreground command only: it does not start a daemon, call Herdr, launch OAuth, or control an unrelated running agy/GUI process; the user quits/restarts standalone agy around the command.
+The account catalog stores a non-secret rotation order of stable account IDs, a cursor identifying the last attempted/selected account, and its update time. Legacy catalogs are normalized deterministically with the current default first, followed by existing account order. New accounts append; removals preserve the logical circular successor. Both delegated-task recovery and `cagy accounts switch --auto` use the same health-filtered round-robin engine. Each cycle makes one bounded pass, advances the cursor for every account-specific attempt, live-probes each candidate after identity validation, and wraps on a later cycle. Process-wide OAuth-client and token-service transport failures stop the pass immediately and do not add failure state to every account; a rejected refresh token remains account-specific and becomes `needs_login`. `switch --auto` is a foreground command only: it does not start a daemon, call Herdr, launch OAuth, or control an unrelated running agy/GUI process; the user quits/restarts standalone agy around the command.
 
 ## Visible Transactional Native Account Recovery
 

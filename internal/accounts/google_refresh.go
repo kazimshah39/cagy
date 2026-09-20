@@ -14,7 +14,18 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var ErrCredentialNeedsLogin = errors.New("account credential needs login")
+var (
+	ErrCredentialNeedsLogin         = errors.New("account credential needs login")
+	ErrCredentialRefreshUnavailable = errors.New("account credential refresh is temporarily unavailable")
+)
+
+// CredentialRefreshUnavailable reports process-wide or transport failures that
+// should stop an automatic rotation pass without penalizing every stored
+// account. Authentication rejection of one refresh token is intentionally not
+// included; callers handle that as an account-specific needs-login failure.
+func CredentialRefreshUnavailable(err error) bool {
+	return errors.Is(err, ErrCredentialRefreshUnavailable)
+}
 
 type credentialEncoding uint8
 
@@ -66,7 +77,7 @@ func (r GoogleCredentialRefresher) Refresh(ctx context.Context, credential []byt
 	}
 	clientID, clientSecret, err := googleOAuthClientConfig(r.ClientID, r.ClientSecret)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: OAuth client configuration is unavailable", ErrCredentialRefreshUnavailable)
 	}
 	config := oauth2.Config{
 		ClientID:     clientID,
@@ -93,11 +104,15 @@ func (r GoogleCredentialRefresher) Refresh(ctx context.Context, credential []byt
 		var retrieveError *oauth2.RetrieveError
 		if errors.As(err, &retrieveError) {
 			switch strings.ToLower(strings.TrimSpace(retrieveError.ErrorCode)) {
-			case "invalid_grant", "invalid_client", "unauthorized_client":
+			case "invalid_grant":
 				return nil, fmt.Errorf("%w: Google rejected the reusable credential", ErrCredentialNeedsLogin)
+			case "invalid_client", "unauthorized_client":
+				return nil, fmt.Errorf("%w: Google rejected the OAuth client", ErrCredentialRefreshUnavailable)
+			default:
+				return nil, errors.New("refresh Google account credential failed")
 			}
 		}
-		return nil, errors.New("refresh Google account credential failed")
+		return nil, fmt.Errorf("%w: Google token service could not be reached", ErrCredentialRefreshUnavailable)
 	}
 	if strings.TrimSpace(fresh.AccessToken) == "" {
 		return nil, errors.New("refreshed Google account credential has no access token")

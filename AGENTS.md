@@ -92,7 +92,7 @@ The watchdog uses independent timers for prompt readiness, quota probes, healthy
 - Bound recovery by the unique eligible account pool and the existing task context/deadline. Persist quota and failure results so fresh low/exhausted, disabled, needs-login, missing-vault, current, and already-attempted accounts are skipped safely.
 - Explicit `cagy accounts switch ACCOUNT` refreshes the stored Google token directly, validates its identity without launching agy, and replaces the canonical item through the AGM-compatible delete-and-add `security` flow with allow-all access. It must not show a Keychain password prompt or open browser OAuth.
 - Existing developer ownership and pane scope must be verified before any restart or repair.
-- Stopping agy uses bounded two-stage interruption: send Ctrl+C once, wait briefly, send Ctrl+C again only if the agent remains registered, then wait for confirmed release before closing its pane.
+- Stopping agy uses bounded three-stage interruption: send Ctrl+C once and wait briefly; if still registered, send it again and wait the normal stop budget; only if still registered, send one final Ctrl+C and wait once more. Close the pane only after confirmed release.
 
 ## Security
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -76,7 +77,51 @@ func TestGoogleCredentialRefresherReturnsSafeFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected refresh failure")
 	}
+	if !CredentialFailureNeedsLogin(err) || CredentialRefreshUnavailable(err) {
+		t.Fatalf("invalid_grant classification=%v", err)
+	}
 	for _, secret := range []string{"saved-refresh", "secret-provider-detail", "invalid_grant"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked %q: %v", secret, err)
+		}
+	}
+}
+
+type refreshRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f refreshRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestGoogleCredentialRefresherClassifiesOAuthClientFailureAsGlobal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":"invalid_client","error_description":"private-provider-detail"}`))
+	}))
+	defer server.Close()
+	credential := []byte(`{"token":{"access_token":"expired-access","refresh_token":"saved-refresh"},"auth_method":"consumer"}`)
+	_, err := (GoogleCredentialRefresher{ClientID: "client", ClientSecret: "secret", TokenURL: server.URL, Client: server.Client()}).Refresh(context.Background(), credential)
+	if err == nil || !CredentialRefreshUnavailable(err) || CredentialFailureNeedsLogin(err) {
+		t.Fatalf("classification=%v", err)
+	}
+	for _, secret := range []string{"saved-refresh", "private-provider-detail", "invalid_client"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestGoogleCredentialRefresherClassifiesTransportFailureAsGlobal(t *testing.T) {
+	client := &http.Client{Transport: refreshRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("private-network-detail")
+	})}
+	credential := []byte(`{"token":{"access_token":"expired-access","refresh_token":"saved-refresh"},"auth_method":"consumer"}`)
+	_, err := (GoogleCredentialRefresher{ClientID: "client", ClientSecret: "secret", Client: client}).Refresh(context.Background(), credential)
+	if err == nil || !CredentialRefreshUnavailable(err) || CredentialFailureNeedsLogin(err) {
+		t.Fatalf("classification=%v", err)
+	}
+	for _, secret := range []string{"saved-refresh", "private-network-detail"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("error leaked %q: %v", secret, err)
 		}

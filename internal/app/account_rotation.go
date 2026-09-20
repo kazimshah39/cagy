@@ -77,6 +77,9 @@ func (a *App) rotateAccounts(ctx context.Context, service *accounts.AccountServi
 		}
 		activated, switchErr := service.SwitchAutomatic(ctx, candidate.Account.ID)
 		if switchErr != nil {
+			if accounts.CredentialRefreshUnavailable(switchErr) {
+				return rotationResult{Summary: summary, Original: originalID}, fmt.Errorf("stored account refresh is temporarily unavailable: %w", switchErr)
+			}
 			summary.Failed++
 			permanent := accounts.CredentialFailureNeedsLogin(switchErr)
 			_ = service.RecordRotationFailure(candidate.Account.ID, permanent)

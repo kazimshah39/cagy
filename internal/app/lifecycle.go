@@ -743,11 +743,18 @@ func (a *App) restartDeveloperInPlace(ctx context.Context, info runtimeContext, 
 }
 
 func (a *App) interruptAndWaitAgent(ctx context.Context, target string) error {
-	a.debugf("lifecycle agent-stop interrupt developer=%q attempt=1", target)
-	if err := a.herdr.SendAgentKeys(ctx, target, "ctrl+c"); err != nil {
-		if herdr.IsCode(err, "agent_not_found") {
-			return nil
+	sendInterrupt := func(attempt int) error {
+		a.debugf("lifecycle agent-stop interrupt developer=%q attempt=%d", target, attempt)
+		if err := a.herdr.SendAgentKeys(ctx, target, "ctrl+c"); err != nil {
+			if herdr.IsCode(err, "agent_not_found") {
+				return nil
+			}
+			return err
 		}
+		return nil
+	}
+
+	if err := sendInterrupt(1); err != nil {
 		return err
 	}
 	grace := a.agentStopEscalation
@@ -760,14 +767,21 @@ func (a *App) interruptAndWaitAgent(ctx context.Context, target string) error {
 		return err
 	}
 
-	// agy's idle TUI commonly treats the first Ctrl+C as cancellation and the
-	// second as exit. Escalate automatically so users never need to run the
-	// stop command twice.
-	a.debugf("lifecycle agent-stop interrupt developer=%q attempt=2", target)
-	if err := a.herdr.SendAgentKeys(ctx, target, "ctrl+c"); err != nil {
-		if herdr.IsCode(err, "agent_not_found") {
-			return nil
-		}
+	// A busy agy can consume one interrupt cancelling its background work and
+	// a second interrupt cancelling the active turn, leaving the idle TUI
+	// registered in Herdr. Wait the normal stop budget after the second
+	// interrupt, then send one final bounded interrupt to exit that idle TUI.
+	// This remains finite and never closes a pane until Herdr confirms release.
+	if err := sendInterrupt(2); err != nil {
+		return err
+	}
+	if err := a.waitAgentReleased(ctx, target); err == nil {
+		return nil
+	} else if !errors.Is(err, errAgentReleaseTimeout) {
+		return err
+	}
+
+	if err := sendInterrupt(3); err != nil {
 		return err
 	}
 	return a.waitAgentReleased(ctx, target)

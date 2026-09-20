@@ -396,6 +396,15 @@ func TestValidateTaskJournalRejectsInvalidIdentityAndMetadata(t *testing.T) {
 		{name: "offset without session", mutate: func(r *taskJournal) { r.CheckpointSessionID = ""; r.CompactOffset = 1 }},
 		{name: "hash", mutate: func(r *taskJournal) { r.TaskHash = "bad" }},
 		{name: "phase", mutate: func(r *taskJournal) { r.Phase = "mystery" }},
+		{name: "failure code", mutate: func(r *taskJournal) { r.FailureCode = "unknown_failure"; r.FailureAt = r.StartedAt }},
+		{name: "failure code without timestamp", mutate: func(r *taskJournal) { r.FailureCode = taskFailureQuotaRecoveryStopTimeout }},
+		{name: "failure outside uncertain phase", mutate: func(r *taskJournal) { r.FailureCode = taskFailureQuotaRecoveryStopTimeout; r.FailureAt = r.StartedAt }},
+		{name: "failure timestamp before task", mutate: func(r *taskJournal) {
+			r.Phase = taskPhaseUncertain
+			r.FailureCode = taskFailureQuotaRecoveryStopTimeout
+			r.FailureAt = r.StartedAt.Add(-time.Second)
+		}},
+		{name: "failure timestamp without code", mutate: func(r *taskJournal) { r.FailureAt = r.StartedAt }},
 		{name: "timestamps", mutate: func(r *taskJournal) { r.UpdatedAt = r.StartedAt.Add(-time.Second) }},
 	}
 	for _, test := range tests {
@@ -744,7 +753,7 @@ func TestInterruptedBackgroundTaskIsRunningEvenWithIdleFooter(t *testing.T) {
 	runner.assertDone()
 }
 
-func TestTaskJournalVersion2AndReceiptGeneration(t *testing.T) {
+func TestTaskJournalVersion3AndReceiptGeneration(t *testing.T) {
 	stateDir := t.TempDir()
 	now := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC)
 	app := New(&scriptedRunner{t: t}, &strings.Builder{}, &strings.Builder{})
@@ -767,8 +776,8 @@ func TestTaskJournalVersion2AndReceiptGeneration(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("load failed exists=%v err=%v", exists, err)
 	}
-	if record.Version != 2 {
-		t.Fatalf("expected version 2, got %d", record.Version)
+	if record.Version != taskJournalVersion {
+		t.Fatalf("expected version 3, got %d", record.Version)
 	}
 	if record.DeliveryReceipt != "" {
 		t.Fatalf("expected empty receipt while submitting, got %q", record.DeliveryReceipt)
@@ -862,7 +871,7 @@ func TestLegacyVersion1JournalMigrationAndReceipt(t *testing.T) {
 		t.Fatalf("inspection mutated journal before locked recovery: version=%d receipt=%q", stillV1.Version, stillV1.DeliveryReceipt)
 	}
 
-	// Locked recovery path performs the legacy v1 migration and receipt persistence
+	// Locked recovery path performs the legacy journal migration and receipt persistence
 	recovered, err := app.recoverTask(context.Background())
 	if err != nil {
 		t.Fatalf("recoverTask failed: %v", err)
@@ -878,8 +887,8 @@ func TestLegacyVersion1JournalMigrationAndReceipt(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("load migrated failed: %v", err)
 	}
-	if migrated.Version != 2 {
-		t.Fatalf("expected migrated version 2, got %d", migrated.Version)
+	if migrated.Version != taskJournalVersion {
+		t.Fatalf("expected migrated version %d, got %d", taskJournalVersion, migrated.Version)
 	}
 	if migrated.DeliveryReceipt != recovered.Receipt {
 		t.Fatalf("migrated receipt %q != recovered receipt %q", migrated.DeliveryReceipt, recovered.Receipt)
@@ -962,7 +971,7 @@ func TestLegacyVersion1JournalWithExistingReceiptMigration(t *testing.T) {
 		t.Fatalf("inspection mutated journal on disk: version=%d receipt=%q", stillV1.Version, stillV1.DeliveryReceipt)
 	}
 
-	// Locked recovery migrates v1 to v2 while preserving the existing receipt
+	// Locked recovery migrates v1 to the current version while preserving the existing receipt
 	recovered, err := app.recoverTask(context.Background())
 	if err != nil {
 		t.Fatalf("recoverTask failed: %v", err)
@@ -978,8 +987,8 @@ func TestLegacyVersion1JournalWithExistingReceiptMigration(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("load migrated failed: %v", err)
 	}
-	if migrated.Version != 2 {
-		t.Fatalf("expected migrated version 2, got %d", migrated.Version)
+	if migrated.Version != taskJournalVersion {
+		t.Fatalf("expected migrated version %d, got %d", taskJournalVersion, migrated.Version)
 	}
 	if migrated.DeliveryReceipt != existingReceipt {
 		t.Fatalf("migrated receipt %q != existing receipt %q", migrated.DeliveryReceipt, existingReceipt)
@@ -1777,4 +1786,118 @@ func TestRecoverInterruptedTaskPreservesReceiptOnStdoutFailure(t *testing.T) {
 		t.Fatal("receipt mismatch")
 	}
 	runner.assertDone()
+}
+
+func TestUncertainQuotaFailureOverridesStaleBackgroundMarkerWhenDeveloperIdle(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developerTarget := developerName("w1", "w1:p1")
+	brainRoot := t.TempDir()
+	task := "task interrupted during quota recovery"
+	taskID := testConversationID + "/task-stale"
+	writeAgyTaskOnly(t, brainRoot, testConversationID, task)
+	appendAgyEvent(t, brainRoot, testConversationID, "MODEL", "GENERIC", "RUNNING", "Tool is running as a background task with task id: "+taskID)
+	appendAgyAnswer(t, brainRoot, testConversationID, "Waiting for background work.")
+
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "agent", "get", developerTarget}, result: agentJSONWithSession("w1:p2", "w1", project, "idle", testConversationID)},
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developerTarget, "cagy_role": "developer"})},
+		{want: []string{"herdr", "agent", "read", developerTarget, "--source", "visible", "--lines", "80"}, result: textResult(">\n────────────────────\n? for shortcuts\n")},
+	}}
+	app := New(runner, &strings.Builder{}, &strings.Builder{})
+	app.stateDir = t.TempDir()
+	app.agyBrainRoot = brainRoot
+	app.getenv = cagyEnv(project, developerTarget)
+	info, _ := app.context()
+	developer := herdr.AgentInfo{Agent: "agy", AgentStatus: "idle", PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
+	if err := app.beginTaskTracking(info, developer, task, transcript.Checkpoint{SessionID: testConversationID}, taskPhaseMonitoring); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.setTrackedFailure(taskFailureQuotaRecoveryStopTimeout, developer); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := app.inspectTaskJournal(context.Background(), info, *app.activeTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.kind != taskInspectionUncertain || inspection.developerRunning {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+	if !strings.Contains(inspection.message, "quota was exhausted") || !strings.Contains(inspection.message, "bounded interrupts") {
+		t.Fatalf("message=%q", inspection.message)
+	}
+	runner.assertDone()
+}
+
+func TestUncertainQuotaFailureStillReportsRunningWhenDeveloperIsWorking(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developerTarget := developerName("w1", "w1:p1")
+	brainRoot := t.TempDir()
+	task := "task resumed after quota recovery warning"
+	writeAgyTaskOnly(t, brainRoot, testConversationID, task)
+
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "agent", "get", developerTarget}, result: agentJSONWithSession("w1:p2", "w1", project, "working", testConversationID)},
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developerTarget, "cagy_role": "developer"})},
+		{want: []string{"herdr", "agent", "read", developerTarget, "--source", "visible", "--lines", "80"}, result: textResult("Working\nesc to cancel\n")},
+	}}
+	app := New(runner, &strings.Builder{}, &strings.Builder{})
+	app.stateDir = t.TempDir()
+	app.agyBrainRoot = brainRoot
+	app.getenv = cagyEnv(project, developerTarget)
+	info, _ := app.context()
+	developer := herdr.AgentInfo{Agent: "agy", AgentStatus: "working", PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
+	if err := app.beginTaskTracking(info, developer, task, transcript.Checkpoint{SessionID: testConversationID}, taskPhaseMonitoring); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.setTrackedFailure(taskFailureQuotaRecoveryStopTimeout, developer); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := app.inspectTaskJournal(context.Background(), info, *app.activeTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.kind != taskInspectionRunning || !inspection.developerRunning {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+	runner.assertDone()
+}
+
+func TestMissingDeveloperReportsPersistedQuotaRestoreFailure(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developerTarget := developerName("w1", "w1:p1")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "agent", "get", developerTarget}, result: jsonError("agent_not_found", "developer stopped")},
+	}}
+	app := New(runner, &strings.Builder{}, &strings.Builder{})
+	app.stateDir = t.TempDir()
+	app.getenv = cagyEnv(project, developerTarget)
+	info, _ := app.context()
+	developer := herdr.AgentInfo{Agent: "agy", PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", ForegroundCWD: project, AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: testConversationID}}
+	if err := app.beginTaskTracking(info, developer, "restore failed task", transcript.Checkpoint{SessionID: testConversationID}, taskPhaseMonitoring); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.setTrackedFailure(taskFailureQuotaOriginalRestoreFailed, developer); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := app.inspectTaskJournal(context.Background(), info, *app.activeTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.kind != taskInspectionUncertain || !strings.Contains(inspection.message, "could not be restored") || !strings.Contains(inspection.message, "not running") {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+	runner.assertDone()
+}
+
+func TestLegacyTaskJournalVersionsRemainValid(t *testing.T) {
+	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p1", developer: "developer", project: "/tmp/project"}
+	for _, version := range []int{1, 2} {
+		record := validTaskJournal(info)
+		record.Version = version
+		if err := validateTaskJournal(record, info); err != nil {
+			t.Fatalf("version %d rejected: %v", version, err)
+		}
+	}
 }

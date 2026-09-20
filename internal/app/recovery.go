@@ -111,11 +111,17 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 	candidates := accounts.SelectCandidates(catalog, accounts.SelectionOptions{CurrentID: currentID, AttemptedIDs: attempted, MissingVaultIDs: missing, Now: a.now().UTC(), MaxVerificationAge: recoveryQuotaCacheAge})
 	a.debugf("recovery candidates task=%q current=%q candidates=%d missing=%d", taskID, debugAccountID(currentID), len(candidates), len(missing))
 	if len(candidates) == 0 {
+		a.warnTrackedFailure(taskFailureQuotaAccountsUnavailable, developer)
 		return "", developer, noRecoveryAccountError(catalog, missing, recoverySummary{})
 	}
 
 	fmt.Fprintln(a.stderr, "cagy: quota is low; switching to another stored account automatically")
 	if err := a.stopForRecovery(ctx, info.developer); err != nil {
+		failureCode := taskFailureQuotaRecoveryStopFailed
+		if errors.Is(err, errAgentReleaseTimeout) {
+			failureCode = taskFailureQuotaRecoveryStopTimeout
+		}
+		a.warnTrackedFailure(failureCode, developer)
 		return "", developer, fmt.Errorf("stop quota-limited agy before account switch: %w", err)
 	}
 	developerRunning := false
@@ -217,12 +223,26 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 	if developerRunning {
 		_ = a.stopForRecovery(ctx, info.developer)
 	}
-	restored, restoreErr := a.restoreRecoveryDeveloper(ctx, info, service, paneID, sessionID, originalID)
+	refreshUnavailable := accounts.CredentialRefreshUnavailable(rotateErr)
+	var restored herdr.AgentInfo
+	var restoreErr error
+	if refreshUnavailable {
+		restored, restoreErr = a.restartUnchangedRecoveryDeveloper(ctx, info, service, paneID, sessionID, originalID)
+	} else {
+		restored, restoreErr = a.restoreRecoveryDeveloper(ctx, info, service, paneID, sessionID, originalID)
+	}
 	if restoreErr == nil {
 		developer = restored
+		failureCode := taskFailureQuotaAccountsUnavailable
+		if refreshUnavailable {
+			failureCode = taskFailureQuotaRefreshUnavailable
+		}
+		a.warnTrackedFailure(failureCode, developer)
 		if !trigger.ObservedAt.IsZero() {
 			_ = service.RecordQuota(originalID, trigger.snapshot())
 		}
+	} else {
+		a.warnTrackedFailure(taskFailureQuotaOriginalRestoreFailed, developer)
 	}
 	a.debugf("recovery exhausted task=%q attempted=%d low=%d unknown=%d failed=%d restored=%t restore_error=%q", taskID, rotation.Summary.Attempted, rotation.Summary.Low, rotation.Summary.Unknown, rotation.Summary.Failed, restoreErr == nil, restoreErr)
 	if restoreErr != nil {
@@ -280,6 +300,32 @@ func (a *App) completedTrackedPrompt(developer herdr.AgentInfo, prompt string) (
 		return "", false
 	}
 	return strings.TrimSpace(state.Response), true
+}
+
+func (a *App) restartUnchangedRecoveryDeveloper(ctx context.Context, info runtimeContext, service *accounts.AccountService, paneID, sessionID, originalAccountID string) (herdr.AgentInfo, error) {
+	if originalAccountID == "" {
+		return herdr.AgentInfo{}, errors.New("original stored account is unknown")
+	}
+	catalog, err := service.Repository.LoadCatalog()
+	if err != nil {
+		return herdr.AgentInfo{}, fmt.Errorf("verify unchanged original account: %w", err)
+	}
+	if catalog.DefaultAccountID != originalAccountID {
+		return herdr.AgentInfo{}, errors.New("original account is no longer the active stored account")
+	}
+	if _, exists, err := service.Repository.LoadTransaction(); err != nil {
+		return herdr.AgentInfo{}, fmt.Errorf("verify account recovery transaction: %w", err)
+	} else if exists {
+		return herdr.AgentInfo{}, errors.New("account recovery transaction is still incomplete")
+	}
+	restarted, err := a.startForRecovery(ctx, info, paneID, sessionID)
+	if err != nil {
+		return herdr.AgentInfo{}, err
+	}
+	if err := a.bindForRecovery(ctx, info.developer, paneID, originalAccountID); err != nil {
+		return herdr.AgentInfo{}, err
+	}
+	return restarted, nil
 }
 
 func (a *App) restoreRecoveryDeveloper(ctx context.Context, info runtimeContext, service *accounts.AccountService, paneID, sessionID, originalAccountID string) (herdr.AgentInfo, error) {

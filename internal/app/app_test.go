@@ -960,6 +960,43 @@ func TestStopAutomaticallySendsSecondInterruptWhenAgyNeedsIt(t *testing.T) {
 	}
 }
 
+func TestStopSendsFinalInterruptAfterBusyTurnCancellation(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	developer := developerName("w1", "w1:p1")
+	runner := &scriptedRunner{t: t, steps: []runStep{
+		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
+		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: jsonError("agent_not_found", "stopped")},
+		{want: []string{"herdr", "pane", "close", "w1:p2"}, result: jsonResult(`{"type":"pane_info"}`)},
+	}}
+	var stdout strings.Builder
+	app := New(runner, &stdout, &strings.Builder{})
+	app.agentStopEscalation = time.Millisecond
+	app.agentStopTimeout = time.Millisecond
+	app.developerPoll = time.Second
+	app.getenv = envGetter(map[string]string{
+		"HERDR_ENV":               "1",
+		"HERDR_WORKSPACE_ID":      "w1",
+		"HERDR_PANE_ID":           "w1:p1",
+		"CAGY_SUPERVISOR_PANE_ID": "w1:p1",
+		"CAGY_DEVELOPER":          developer,
+		"CAGY_PROJECT_DIR":        project,
+	})
+	if err := app.stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner.assertDone()
+	if !strings.Contains(stdout.String(), "stopped the agy developer") {
+		t.Fatalf("stop output=%q", stdout.String())
+	}
+}
+
 func TestStopAbortsIfAgentReleaseTimesOut(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	developer := developerName("w1", "w1:p1")
@@ -967,6 +1004,8 @@ func TestStopAbortsIfAgentReleaseTimesOut(t *testing.T) {
 		{want: []string{"herdr", "pane", "get", "w1:p1"}, result: supervisorPaneJSON(project)},
 		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "idle")},
 		{want: []string{"herdr", "pane", "get", "w1:p2"}, result: paneJSON("w1:p2", "w1:t1", project, developerPaneLabel, map[string]string{"cagy_owner": developer, "cagy_role": "developer"})},
+		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
+		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
 		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},
 		{want: []string{"herdr", "agent", "get", developer}, result: agentJSON("w1:p2", "w1", project, "working")},
 		{want: []string{"herdr", "agent", "send-keys", developer, "ctrl+c"}, result: jsonResult(`{"type":"agent_info"}`)},

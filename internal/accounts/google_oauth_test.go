@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -141,12 +142,51 @@ func TestGoogleOAuthClientConfigUsesEnvironment(t *testing.T) {
 	}
 }
 
-func TestGoogleOAuthClientConfigRequiresCredentials(t *testing.T) {
+func TestGoogleOAuthClientConfigDiscoversAgyDesktopClient(t *testing.T) {
 	t.Setenv(googleClientIDEnv, "")
 	t.Setenv(googleClientSecretEnv, "")
+	previous := agyOAuthClientLookup
+	agyOAuthClientLookup = func() (string, string, error) {
+		return "1234567890-testclient.apps.googleusercontent.com", "GOCSPX-testclientsecretvalue123", nil
+	}
+	t.Cleanup(func() { agyOAuthClientLookup = previous })
 
-	_, _, err := googleOAuthClientConfig("", "")
-	if err == nil || !strings.Contains(err.Error(), googleClientIDEnv) || !strings.Contains(err.Error(), googleClientSecretEnv) {
-		t.Fatalf("error=%v", err)
+	clientID, clientSecret, err := googleOAuthClientConfig("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientID != "1234567890-testclient.apps.googleusercontent.com" || clientSecret != "GOCSPX-testclientsecretvalue123" {
+		t.Fatalf("config=%q/%q", clientID, clientSecret)
+	}
+}
+
+func TestExtractAgyOAuthClient(t *testing.T) {
+	clientID, clientSecret, err := extractAgyOAuthClient([]byte("noise 1234567890-testclient.apps.googleusercontent.com noise GOCSPX-testclientsecretvalue123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientID != "1234567890-testclient.apps.googleusercontent.com" || clientSecret != "GOCSPX-testclientsecretvalue123" {
+		t.Fatalf("extracted=%q/%q", clientID, clientSecret)
+	}
+}
+
+func TestGoogleOAuthClientConfigFailsWithoutOverridesOrAgy(t *testing.T) {
+	t.Setenv(googleClientIDEnv, "")
+	t.Setenv(googleClientSecretEnv, "")
+	previous := agyOAuthClientLookup
+	agyOAuthClientLookup = func() (string, string, error) { return "", "", errors.New("not installed") }
+	t.Cleanup(func() { agyOAuthClientLookup = previous })
+	if _, _, err := googleOAuthClientConfig("", ""); err == nil {
+		t.Fatal("expected missing OAuth configuration")
+	}
+}
+
+func TestDiscoverAgyOAuthClientWhenInstalled(t *testing.T) {
+	clientID, clientSecret, err := discoverAgyOAuthClient()
+	if err != nil {
+		t.Skipf("agy is not installed in this test environment: %v", err)
+	}
+	if clientID == "" || clientSecret == "" {
+		t.Fatal("agy OAuth client discovery returned empty values")
 	}
 }

@@ -336,12 +336,20 @@ func TestRecoveryWithoutResolvedCurrentAccountStillTriesStoredAccounts(t *testin
 
 func TestRecoveryWithNoCandidateDoesNotStopDeveloper(t *testing.T) {
 	fixture := newRecoveryFixture(t, 1)
+	trackRecoveryTask(t, fixture, "original")
 	_, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "original", false, exhaustedRecoveryQuota(fixture.app.now()))
 	if err == nil || !strings.Contains(err.Error(), "no healthy stored agy account") {
 		t.Fatalf("error=%v", err)
 	}
 	if fixture.stopCount != 0 || len(fixture.startIDs) != 0 || len(fixture.prompts) != 0 {
 		t.Fatalf("stops=%d starts=%v prompts=%v", fixture.stopCount, fixture.startIDs, fixture.prompts)
+	}
+	record, exists, loadErr := fixture.app.loadTaskJournal(fixture.info.developer)
+	if loadErr != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, loadErr)
+	}
+	if record.FailureCode != taskFailureQuotaAccountsUnavailable || record.Phase != taskPhaseUncertain {
+		t.Fatalf("record=%+v", record)
 	}
 }
 
@@ -441,4 +449,113 @@ func TestCurrentAccountForRecoveryRejectsBindingOutsideCatalog(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 	runner.assertDone()
+}
+
+func trackRecoveryTask(t *testing.T, fixture *recoveryFixture, task string) {
+	t.Helper()
+	if err := fixture.app.beginTaskTracking(fixture.info, fixture.developer, task, transcript.Checkpoint{SessionID: testConversationID}, taskPhaseMonitoring); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryStopTimeoutPersistsSafeFailureReason(t *testing.T) {
+	fixture := newRecoveryFixture(t, 2)
+	trackRecoveryTask(t, fixture, "stop timeout task")
+	fixture.app.recoveryStop = func(context.Context, string) error {
+		return errAgentReleaseTimeout
+	}
+
+	_, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "stop timeout task", true, exhaustedRecoveryQuota(fixture.app.now()))
+	if err == nil || !errors.Is(err, errAgentReleaseTimeout) {
+		t.Fatalf("error=%v", err)
+	}
+	record, exists, loadErr := fixture.app.loadTaskJournal(fixture.info.developer)
+	if loadErr != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, loadErr)
+	}
+	if record.Phase != taskPhaseUncertain || record.FailureCode != taskFailureQuotaRecoveryStopTimeout || record.FailureAt.IsZero() {
+		t.Fatalf("record=%+v", record)
+	}
+}
+
+func TestRecoveryExhaustedPoolPersistsOriginalRestoredReason(t *testing.T) {
+	fixture := newRecoveryFixture(t, 2)
+	trackRecoveryTask(t, fixture, "exhausted pool task")
+	fixture.probeQueue = []quotaProbeResult{exhaustedRecoveryQuota(fixture.app.now())}
+
+	_, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "exhausted pool task", true, exhaustedRecoveryQuota(fixture.app.now()))
+	if err == nil || !strings.Contains(err.Error(), "original developer was restored") {
+		t.Fatalf("error=%v", err)
+	}
+	record, exists, loadErr := fixture.app.loadTaskJournal(fixture.info.developer)
+	if loadErr != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, loadErr)
+	}
+	if record.Phase != taskPhaseUncertain || record.FailureCode != taskFailureQuotaAccountsUnavailable || record.FailureAt.IsZero() {
+		t.Fatalf("record=%+v", record)
+	}
+}
+
+func TestRecoveryExhaustedPoolPersistsOriginalRestoreFailure(t *testing.T) {
+	fixture := newRecoveryFixture(t, 2)
+	trackRecoveryTask(t, fixture, "restore failure task")
+	fixture.probeQueue = []quotaProbeResult{exhaustedRecoveryQuota(fixture.app.now())}
+	startCalls := 0
+	fixture.app.recoveryStart = func(_ context.Context, _ runtimeContext, paneID, sessionID string) (herdr.AgentInfo, error) {
+		if paneID != fixture.developer.PaneID || sessionID != testConversationID {
+			return herdr.AgentInfo{}, fmt.Errorf("unexpected restart pane=%s session=%s", paneID, sessionID)
+		}
+		startCalls++
+		if startCalls == 2 {
+			return herdr.AgentInfo{}, errors.New("simulated original restart failure")
+		}
+		return fixture.developer, nil
+	}
+
+	_, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "restore failure task", true, exhaustedRecoveryQuota(fixture.app.now()))
+	if err == nil || !strings.Contains(err.Error(), "original developer could not be restored") {
+		t.Fatalf("error=%v", err)
+	}
+	record, exists, loadErr := fixture.app.loadTaskJournal(fixture.info.developer)
+	if loadErr != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, loadErr)
+	}
+	if record.Phase != taskPhaseUncertain || record.FailureCode != taskFailureQuotaOriginalRestoreFailed || record.FailureAt.IsZero() {
+		t.Fatalf("record=%+v", record)
+	}
+}
+
+func TestRecoveryGlobalRefreshFailureRestartsUnchangedOriginalOnce(t *testing.T) {
+	fixture := newRecoveryFixture(t, 3)
+	trackRecoveryTask(t, fixture, "global refresh failure task")
+	fixture.service.Validator = rotationValidatorFunc(func(context.Context, []byte) (accounts.ValidationResult, error) {
+		return accounts.ValidationResult{}, fmt.Errorf("temporary refresh outage: %w", accounts.ErrCredentialRefreshUnavailable)
+	})
+
+	_, developer, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "global refresh failure task", true, exhaustedRecoveryQuota(fixture.app.now()))
+	if err == nil || !accounts.CredentialRefreshUnavailable(err) || !strings.Contains(err.Error(), "original developer was restored") {
+		t.Fatalf("developer=%+v error=%v", developer, err)
+	}
+	if len(fixture.startIDs) != 1 || fixture.startIDs[0] != fixture.accounts[0].ID {
+		t.Fatalf("starts=%v", fixture.startIDs)
+	}
+	if len(fixture.boundIDs) != 1 || fixture.boundIDs[0] != fixture.accounts[0].ID {
+		t.Fatalf("bindings=%v", fixture.boundIDs)
+	}
+	record, exists, loadErr := fixture.app.loadTaskJournal(fixture.info.developer)
+	if loadErr != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, loadErr)
+	}
+	if record.FailureCode != taskFailureQuotaRefreshUnavailable || record.Phase != taskPhaseUncertain {
+		t.Fatalf("record=%+v", record)
+	}
+	loaded, loadErr := fixture.service.Repository.LoadCatalog()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	for _, account := range loaded.Accounts[1:] {
+		if account.ConsecutiveFailures != 0 || !account.LastFailureAt.IsZero() {
+			t.Fatalf("global failure incorrectly penalized account: %+v", account)
+		}
+	}
 }

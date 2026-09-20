@@ -112,3 +112,47 @@ func TestEncryptedBackupRejectsTruncationAndCredentialMismatch(t *testing.T) {
 		t.Fatalf("mismatch error=%v", err)
 	}
 }
+
+func TestEncryptedBackupPreservesRotationState(t *testing.T) {
+	catalog, credentials := backupFixture(t)
+	if err := catalog.NormalizeRotation(time.Unix(20, 0)); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Rotation.CursorAccountID = catalog.Rotation.Order[1]
+	catalog.Rotation.UpdatedAt = time.Unix(21, 0).UTC()
+	path := filepath.Join(t.TempDir(), "accounts.cagy")
+	if err := ExportEncrypted(path, catalog, credentials, []byte("passphrase"), false, time.Unix(22, 0)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := ImportEncrypted(path, []byte("passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Rotation == nil || !equalStrings(loaded.Rotation.Order, catalog.Rotation.Order) || loaded.Rotation.CursorAccountID != catalog.Rotation.CursorAccountID {
+		t.Fatalf("rotation=%+v want=%+v", loaded.Rotation, catalog.Rotation)
+	}
+}
+
+func TestMetadataExportIncludesRotationWithoutCredentials(t *testing.T) {
+	catalog, _ := backupFixture(t)
+	if err := catalog.NormalizeRotation(time.Unix(20, 0)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := ExportMetadata(path, catalog, false, time.Unix(22, 0)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"rotation"`) || !strings.Contains(text, catalog.Rotation.Order[0]) {
+		t.Fatalf("rotation missing: %s", text)
+	}
+	for _, forbidden := range []string{"access_token", "refresh_token", "credential_fingerprint"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metadata leaked %q", forbidden)
+		}
+	}
+}

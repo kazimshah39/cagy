@@ -30,7 +30,7 @@ const (
 	maxBackupParallelism  = 8
 	maxBackupBytes        = 32 << 20
 	maxBackupAccounts     = 1000
-	metadataExportVersion = 2
+	metadataExportVersion = 3
 )
 
 type backupHeader struct {
@@ -56,6 +56,7 @@ type MetadataExport struct {
 	Version          int               `json:"version"`
 	CreatedAt        time.Time         `json:"created_at"`
 	DefaultAccountID string            `json:"default_account_id,omitempty"`
+	Rotation         *RotationState    `json:"rotation,omitempty"`
 	Accounts         []MetadataAccount `json:"accounts"`
 }
 
@@ -211,7 +212,13 @@ func ExportMetadata(path string, catalog Catalog, force bool, now time.Time) err
 	if now.IsZero() {
 		now = time.Now()
 	}
-	export := MetadataExport{Version: metadataExportVersion, CreatedAt: now.UTC(), DefaultAccountID: catalog.DefaultAccountID}
+	rotation := catalog.Rotation
+	if rotation != nil {
+		copyRotation := *rotation
+		copyRotation.Order = append([]string(nil), rotation.Order...)
+		rotation = &copyRotation
+	}
+	export := MetadataExport{Version: metadataExportVersion, CreatedAt: now.UTC(), DefaultAccountID: catalog.DefaultAccountID, Rotation: rotation}
 	for _, account := range catalog.Accounts {
 		export.Accounts = append(export.Accounts, MetadataAccount{
 			ID: account.ID, Provider: account.Provider, Label: account.Label, Email: account.Email,

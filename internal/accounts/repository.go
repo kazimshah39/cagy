@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"time"
 
 	"github.com/kazimshah39/cagy/internal/securestate"
 )
@@ -47,6 +48,9 @@ func (r Repository) LoadCatalog() (Catalog, error) {
 
 func (r Repository) SaveCatalog(catalog Catalog) error {
 	catalog.Version = CatalogVersion
+	if err := catalog.NormalizeRotation(time.Now().UTC()); err != nil {
+		return err
+	}
 	catalog.Sort()
 	if err := catalog.Validate(); err != nil {
 		return err

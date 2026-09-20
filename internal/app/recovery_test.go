@@ -318,6 +318,22 @@ func TestRecoveryRestartFailureRestoresOriginalWithoutTryingEveryAccount(t *test
 	}
 }
 
+func TestRecoveryWithoutResolvedCurrentAccountStillTriesStoredAccounts(t *testing.T) {
+	fixture := newRecoveryFixture(t, 1)
+	fixture.app.recoveryCurrentAccount = func(context.Context, runtimeContext, herdr.AgentInfo, accounts.Catalog) (string, error) {
+		return "", nil
+	}
+	fixture.probeQueue = []quotaProbeResult{availableRecoveryQuota(fixture.app.now())}
+
+	output, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "original", false, exhaustedRecoveryQuota(fixture.app.now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "done" || fixture.stopCount != 1 || len(fixture.startIDs) != 1 {
+		t.Fatalf("output=%q stops=%d starts=%v", output, fixture.stopCount, fixture.startIDs)
+	}
+}
+
 func TestRecoveryWithNoCandidateDoesNotStopDeveloper(t *testing.T) {
 	fixture := newRecoveryFixture(t, 1)
 	_, _, err := fixture.app.recover(context.Background(), fixture.info, fixture.developer, "original", false, exhaustedRecoveryQuota(fixture.app.now()))

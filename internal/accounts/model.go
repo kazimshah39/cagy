@@ -61,11 +61,18 @@ type Account struct {
 	Quota                 *QuotaSnapshot `json:"quota_snapshot,omitempty"`
 }
 
+type RotationState struct {
+	Order           []string  `json:"order"`
+	CursorAccountID string    `json:"cursor_account_id,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at,omitempty"`
+}
+
 type Catalog struct {
-	Version          int       `json:"version"`
-	Revision         uint64    `json:"revision"`
-	DefaultAccountID string    `json:"default_account_id,omitempty"`
-	Accounts         []Account `json:"accounts"`
+	Version          int            `json:"version"`
+	Revision         uint64         `json:"revision"`
+	DefaultAccountID string         `json:"default_account_id,omitempty"`
+	Rotation         *RotationState `json:"rotation,omitempty"`
+	Accounts         []Account      `json:"accounts"`
 }
 
 type TransactionKind string
@@ -195,6 +202,186 @@ func (a Account) Validate() error {
 	return nil
 }
 
+func (r RotationState) Validate(accountIDs map[string]struct{}) error {
+	if len(r.Order) == 0 {
+		return errors.New("rotation order cannot be empty")
+	}
+	seen := make(map[string]struct{}, len(r.Order))
+	for _, id := range r.Order {
+		if !accountIDPattern.MatchString(id) {
+			return fmt.Errorf("rotation order has invalid account ID")
+		}
+		if _, ok := accountIDs[id]; !ok {
+			return fmt.Errorf("rotation order references unknown account")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("rotation order contains duplicate account")
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) != len(accountIDs) {
+		return errors.New("rotation order does not contain every account")
+	}
+	if r.CursorAccountID != "" {
+		if _, ok := seen[r.CursorAccountID]; !ok {
+			return errors.New("rotation cursor references unknown account")
+		}
+		if r.UpdatedAt.IsZero() {
+			return errors.New("rotation cursor timestamp is required")
+		}
+	} else if !r.UpdatedAt.IsZero() {
+		return errors.New("rotation timestamp requires a cursor")
+	}
+	return nil
+}
+
+// NormalizeRotation initializes or updates only the additive rotation metadata.
+// Legacy catalogs are ordered with the current default first, followed by the
+// existing account slice order. New IDs append; removed IDs are dropped.
+func (c *Catalog) NormalizeRotation(now time.Time) error {
+	if c == nil {
+		return errors.New("catalog is nil")
+	}
+	if len(c.Accounts) == 0 {
+		c.Rotation = nil
+		return nil
+	}
+	ids := make(map[string]struct{}, len(c.Accounts))
+	for _, account := range c.Accounts {
+		if _, duplicate := ids[account.ID]; duplicate {
+			return errors.New("duplicate account ID")
+		}
+		ids[account.ID] = struct{}{}
+	}
+	if c.Rotation == nil {
+		order := make([]string, 0, len(c.Accounts))
+		appendID := func(id string) {
+			if _, ok := ids[id]; !ok {
+				return
+			}
+			for _, existing := range order {
+				if existing == id {
+					return
+				}
+			}
+			order = append(order, id)
+		}
+		appendID(c.DefaultAccountID)
+		for _, account := range c.Accounts {
+			appendID(account.ID)
+		}
+		c.Rotation = &RotationState{Order: order}
+		return nil
+	}
+	seen := make(map[string]struct{}, len(c.Accounts))
+	order := make([]string, 0, len(c.Accounts))
+	for _, id := range c.Rotation.Order {
+		if !accountIDPattern.MatchString(id) {
+			return errors.New("rotation order has invalid account ID")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("rotation order contains duplicate account")
+		}
+		seen[id] = struct{}{}
+		if _, exists := ids[id]; exists {
+			order = append(order, id)
+		}
+	}
+	for _, account := range c.Accounts {
+		if _, exists := seen[account.ID]; !exists {
+			order = append(order, account.ID)
+		}
+	}
+	cursor := c.Rotation.CursorAccountID
+	if cursor != "" {
+		found := false
+		for _, id := range order {
+			if id == cursor {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if len(order) > 0 {
+				cursor = order[len(order)-1]
+				if now.IsZero() {
+					now = time.Now().UTC()
+				}
+				c.Rotation.UpdatedAt = now.UTC()
+			} else {
+				cursor = ""
+				c.Rotation.UpdatedAt = time.Time{}
+			}
+		}
+	}
+	c.Rotation.Order = order
+	c.Rotation.CursorAccountID = cursor
+	if cursor == "" {
+		c.Rotation.UpdatedAt = time.Time{}
+	}
+	return nil
+}
+
+// AppendRotationAccount appends a new account ID without disturbing the
+// existing circular sequence.
+func (c *Catalog) AppendRotationAccount(accountID string) error {
+	if c == nil {
+		return errors.New("catalog is nil")
+	}
+	if c.Rotation == nil {
+		if err := c.NormalizeRotation(time.Time{}); err != nil {
+			return err
+		}
+	}
+	for _, id := range c.Rotation.Order {
+		if id == accountID {
+			return nil
+		}
+	}
+	c.Rotation.Order = append(c.Rotation.Order, accountID)
+	return nil
+}
+
+// RemoveRotationAccount removes an ID and keeps the same logical successor
+// after the cursor when possible.
+func (c *Catalog) RemoveRotationAccount(accountID string) error {
+	if c == nil || c.Rotation == nil {
+		return nil
+	}
+	order := c.Rotation.Order
+	index := -1
+	for i, id := range order {
+		if id == accountID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil
+	}
+	wasCursor := c.Rotation.CursorAccountID == accountID
+	order = append(order[:index], order[index+1:]...)
+	c.Rotation.Order = order
+	if len(order) == 0 {
+		c.Rotation = nil
+		return nil
+	}
+	if wasCursor {
+		// The previous circular account becomes the new cursor, so the account
+		// that followed the removed cursor remains next.
+		c.Rotation.CursorAccountID = order[(index-1+len(order))%len(order)]
+		c.Rotation.UpdatedAt = time.Now().UTC()
+	}
+	return nil
+}
+
+func (c Catalog) RotationOrder() []string {
+	if c.Rotation == nil {
+		return nil
+	}
+	return append([]string(nil), c.Rotation.Order...)
+}
+
 func (c Catalog) Validate() error {
 	if c.Version != CatalogVersion {
 		return fmt.Errorf("unsupported account catalog version %d", c.Version)
@@ -218,6 +405,11 @@ func (c Catalog) Validate() error {
 	if c.DefaultAccountID != "" {
 		if _, found := ids[c.DefaultAccountID]; !found {
 			return errors.New("default account does not exist in catalog")
+		}
+	}
+	if c.Rotation != nil {
+		if err := c.Rotation.Validate(ids); err != nil {
+			return fmt.Errorf("validate rotation state: %w", err)
 		}
 	}
 	return nil

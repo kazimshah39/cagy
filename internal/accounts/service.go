@@ -209,6 +209,11 @@ func (s *AccountService) restoreCredential(ctx context.Context, accountID string
 func cloneCatalog(catalog Catalog) Catalog {
 	cloned := catalog
 	cloned.Accounts = append([]Account(nil), catalog.Accounts...)
+	if catalog.Rotation != nil {
+		rotation := *catalog.Rotation
+		rotation.Order = append([]string(nil), catalog.Rotation.Order...)
+		cloned.Rotation = &rotation
+	}
 	return cloned
 }
 
@@ -282,6 +287,9 @@ func (s *AccountService) upsertValidated(ctx context.Context, result ValidationR
 		catalog.Accounts = append(catalog.Accounts, account)
 		if catalog.DefaultAccountID == "" {
 			catalog.DefaultAccountID = id
+		}
+		if err := catalog.AppendRotationAccount(id); err != nil {
+			return Account{}, err
 		}
 	}
 	catalog.Revision++
@@ -392,6 +400,19 @@ func (s *AccountService) ImportBackup(ctx context.Context, backupCatalog Catalog
 		return err
 	}
 	validatedImports := cloneCatalog(backupCatalog)
+	if validatedImports.Rotation != nil {
+		byID := make(map[string]Account, len(validatedImports.Accounts))
+		for _, imported := range validatedImports.Accounts {
+			byID[imported.ID] = imported
+		}
+		ordered := make([]Account, 0, len(validatedImports.Accounts))
+		for _, id := range validatedImports.Rotation.Order {
+			if imported, found := byID[id]; found {
+				ordered = append(ordered, imported)
+			}
+		}
+		validatedImports.Accounts = ordered
+	}
 	for index := range validatedImports.Accounts {
 		imported := validatedImports.Accounts[index]
 		imported.Quota = nil
@@ -488,6 +509,9 @@ func (s *AccountService) ImportBackup(ctx context.Context, backupCatalog Catalog
 			}
 		} else {
 			catalog.Accounts = append(catalog.Accounts, imported)
+			if err := catalog.AppendRotationAccount(imported.ID); err != nil {
+				return mutationRollbackError(err, rollbackVault())
+			}
 		}
 	}
 	// Do not import the source default automatically.
@@ -556,6 +580,9 @@ func (s *AccountService) Remove(ctx context.Context, accountID string, confirmed
 			catalog.Accounts = append(catalog.Accounts[:index], catalog.Accounts[index+1:]...)
 			break
 		}
+	}
+	if err := catalog.RemoveRotationAccount(accountID); err != nil {
+		return mutationRollbackError(err, s.Vault.Save(ctx, accountID, credential))
 	}
 	catalog.Revision++
 	if err := s.Repository.SaveCatalog(catalog); err != nil {
@@ -660,6 +687,15 @@ func (s *AccountService) RepairTransaction(ctx context.Context) error {
 }
 
 func (s *AccountService) Switch(ctx context.Context, accountID string) (Account, error) {
+	return s.switchAccount(ctx, accountID, false)
+}
+
+// SwitchAutomatic activates a candidate and advances the persistent rotation cursor.
+func (s *AccountService) SwitchAutomatic(ctx context.Context, accountID string) (Account, error) {
+	return s.switchAccount(ctx, accountID, true)
+}
+
+func (s *AccountService) switchAccount(ctx context.Context, accountID string, automatic bool) (Account, error) {
 	s.logf("switch begin account=%q", accountIDPrefix(accountID))
 	lock, err := s.lock()
 	if err != nil {
@@ -773,6 +809,13 @@ func (s *AccountService) Switch(ctx context.Context, accountID string) (Account,
 	usedAt := s.now()
 	target = RecordSuccess(target, usedAt, result.Quota)
 	target.LastUsedAt = usedAt
+	if automatic {
+		if err := catalog.NormalizeRotation(usedAt); err != nil {
+			return rollback(err)
+		}
+		catalog.Rotation.CursorAccountID = target.ID
+		catalog.Rotation.UpdatedAt = usedAt.UTC()
+	}
 	for i := range catalog.Accounts {
 		if catalog.Accounts[i].ID == target.ID {
 			catalog.Accounts[i] = target
@@ -988,6 +1031,75 @@ func (s *AccountService) RecordQuota(accountID string, quota QuotaSnapshot) erro
 // stored credential cannot be reused without an explicit account login.
 func CredentialFailureNeedsLogin(err error) bool {
 	return errors.Is(err, ErrCredentialNeedsLogin)
+}
+
+// RecordRotationObservation stores a live quota result and advances the persistent cursor.
+func (s *AccountService) RecordRotationObservation(accountID string, quota QuotaSnapshot) error {
+	if err := quota.Validate(); err != nil {
+		return fmt.Errorf("validate account quota: %w", err)
+	}
+	lock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if err := s.ensureCleanTransaction(); err != nil {
+		return err
+	}
+	catalog, err := s.Repository.LoadCatalog()
+	if err != nil {
+		return err
+	}
+	if _, found := catalog.Find(accountID); !found {
+		return errors.New("account was not found")
+	}
+	if err := catalog.NormalizeRotation(s.now()); err != nil {
+		return err
+	}
+	for index := range catalog.Accounts {
+		if catalog.Accounts[index].ID == accountID {
+			catalog.Accounts[index] = RecordSuccess(catalog.Accounts[index], s.now(), quota)
+			break
+		}
+	}
+	catalog.Rotation.CursorAccountID = accountID
+	catalog.Rotation.UpdatedAt = s.now()
+	catalog.Revision++
+	return s.Repository.SaveCatalog(catalog)
+}
+
+// RecordRotationFailure records a failed candidate and advances the cursor.
+func (s *AccountService) RecordRotationFailure(accountID string, permanent bool) error {
+	lock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if err := s.ensureCleanTransaction(); err != nil {
+		return err
+	}
+	catalog, err := s.Repository.LoadCatalog()
+	if err != nil {
+		return err
+	}
+	if err := catalog.NormalizeRotation(s.now()); err != nil {
+		return err
+	}
+	found := false
+	for index := range catalog.Accounts {
+		if catalog.Accounts[index].ID == accountID {
+			catalog.Accounts[index] = RecordFailure(catalog.Accounts[index], s.now(), permanent)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("account was not found")
+	}
+	catalog.Rotation.CursorAccountID = accountID
+	catalog.Rotation.UpdatedAt = s.now()
+	catalog.Revision++
+	return s.Repository.SaveCatalog(catalog)
 }
 
 // SetDefaultAccount reconciles non-secret catalog metadata with a verified

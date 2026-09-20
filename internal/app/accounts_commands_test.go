@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kazimshah39/cagy/internal/accounts"
+	proc "github.com/kazimshah39/cagy/internal/process"
 )
 
 func TestAccountsAddUsesLocalOAuthWithoutCanonicalKeychain(t *testing.T) {
@@ -268,5 +269,66 @@ func TestAccountsDoctorReportsInterruptedTransactionWithoutTouchingKeychain(t *t
 	}
 	if _, exists, _ := service.Repository.LoadTransaction(); !exists {
 		t.Fatal("doctor unexpectedly removed the transaction")
+	}
+}
+
+func TestAccountsSwitchAutoHealthyNoOp(t *testing.T) {
+	service, _, canonical, _, account, _ := accountCommandService(t)
+	var output, stderr strings.Builder
+	application := New(&quotaProbeRunner{results: []proc.Result{
+		{Stdout: agyModelResult("gemini-3", "Gemini").Stdout},
+		{Stdout: agyQuotaResult("Gemini Models", .8, .9).Stdout},
+	}}, &output, &stderr)
+	application.checkPlatform = func() error { return nil }
+	application.accountsFactory = func() (*accounts.AccountService, error) { return service, nil }
+	before := append([]byte(nil), canonical.value...)
+	if err := application.accountsCommand(context.Background(), []string{"switch", "--auto"}); err != nil {
+		t.Fatal(err)
+	}
+	if string(canonical.value) != string(before) || !strings.Contains(output.String(), "no switch needed") {
+		t.Fatalf("output=%q canonical_changed=%t", output.String(), string(canonical.value) != string(before))
+	}
+	if !strings.Contains(output.String(), account.Email) {
+		t.Fatalf("output=%q", output.String())
+	}
+}
+
+func TestAccountsSwitchAutoUnknownDoesNotMutate(t *testing.T) {
+	service, _, canonical, _, _, _ := accountCommandService(t)
+	var output, stderr strings.Builder
+	application := New(&quotaProbeRunner{results: []proc.Result{{Stdout: "not-json"}}}, &output, &stderr)
+	application.checkPlatform = func() error { return nil }
+	application.accountsFactory = func() (*accounts.AccountService, error) { return service, nil }
+	before := append([]byte(nil), canonical.value...)
+	if err := application.accountsCommand(context.Background(), []string{"switch", "--auto"}); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("error=%v", err)
+	}
+	if string(canonical.value) != string(before) {
+		t.Fatal("unknown quota changed canonical credential")
+	}
+}
+
+func TestAccountsSwitchAutoRotatesInRoundRobinOrder(t *testing.T) {
+	fixture := newRecoveryFixture(t, 2)
+	var output, stderr strings.Builder
+	fixture.app.stdout = &output
+	fixture.app.stderr = &stderr
+	fixture.app.runner = &quotaProbeRunner{results: []proc.Result{
+		agyModelResult("gemini-3", "Gemini"),
+		agyQuotaResult("Gemini Models", 0, .9),
+		agyModelResult("gemini-3", "Gemini"),
+		agyQuotaResult("Gemini Models", .8, .8),
+	}}
+	fixture.app.checkPlatform = func() error { return nil }
+	fixture.app.accountsFactory = func() (*accounts.AccountService, error) { return fixture.service, nil }
+	if err := fixture.app.accountsCommand(context.Background(), []string{"switch", "--auto"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ := fixture.service.Repository.LoadCatalog()
+	if loaded.DefaultAccountID != fixture.accounts[1].ID || loaded.Rotation.CursorAccountID != fixture.accounts[1].ID {
+		t.Fatalf("default=%s cursor=%s want=%s", loaded.DefaultAccountID, loaded.Rotation.CursorAccountID, fixture.accounts[1].ID)
+	}
+	if !strings.Contains(output.String(), fixture.accounts[1].Email) || !strings.Contains(output.String(), "Restart agy") {
+		t.Fatalf("output=%q", output.String())
 	}
 }

@@ -1,8 +1,6 @@
 package accounts
 
 import (
-	"math"
-	"sort"
 	"time"
 )
 
@@ -33,11 +31,9 @@ type SelectionOptions struct {
 }
 
 // SelectCandidates returns every account that is safe to try during one
-// automatic recovery cycle. Fresh known-good accounts come first. Accounts
-// with stale or unknown quota follow and must be live-probed after agy starts.
-// Fresh low/exhausted accounts are deferred until their observation becomes
-// stale so one recovery cycle cannot immediately churn through known-bad
-// credentials.
+// automatic recovery cycle in persistent circular order. Fresh low/exhausted
+// observations remain deferred until stale; stale and unknown accounts are
+// returned for live probing.
 func SelectCandidates(catalog Catalog, options SelectionOptions) []Candidate {
 	if options.Now.IsZero() {
 		options.Now = time.Now()
@@ -45,8 +41,35 @@ func SelectCandidates(catalog Catalog, options SelectionOptions) []Candidate {
 	if options.MaxVerificationAge <= 0 {
 		options.MaxVerificationAge = 10 * time.Minute
 	}
-	candidates := make([]Candidate, 0, len(catalog.Accounts))
+	byID := make(map[string]Account, len(catalog.Accounts))
 	for _, account := range catalog.Accounts {
+		byID[account.ID] = account
+	}
+	order := catalog.RotationOrder()
+	if len(order) == 0 {
+		for _, account := range catalog.Accounts {
+			order = append(order, account.ID)
+		}
+	}
+	cursor := ""
+	if catalog.Rotation != nil {
+		cursor = catalog.Rotation.CursorAccountID
+	}
+	start := 0
+	if cursor != "" {
+		for index, id := range order {
+			if id == cursor {
+				start = (index + 1) % len(order)
+				break
+			}
+		}
+	}
+	candidates := make([]Candidate, 0, len(order))
+	for offset := 0; offset < len(order); offset++ {
+		account, found := byID[order[(start+offset)%len(order)]]
+		if !found {
+			continue
+		}
 		if account.ID == options.CurrentID || account.State == StateDisabled || account.State == StateNeedsLogin {
 			continue
 		}
@@ -76,36 +99,10 @@ func SelectCandidates(catalog Catalog, options SelectionOptions) []Candidate {
 					continue
 				}
 				candidate.Tier = CandidateKnownAvailable
-				candidate.Score = math.Min(weekly, fiveHour)
 			}
 		}
 		candidates = append(candidates, candidate)
 	}
-
-	sort.SliceStable(candidates, func(left, right int) bool {
-		if candidates[left].Tier != candidates[right].Tier {
-			return candidates[left].Tier == CandidateKnownAvailable
-		}
-		if candidates[left].Score != candidates[right].Score {
-			return candidates[left].Score > candidates[right].Score
-		}
-		if !candidates[left].Account.LastVerifiedAt.Equal(candidates[right].Account.LastVerifiedAt) {
-			return candidates[left].Account.LastVerifiedAt.After(candidates[right].Account.LastVerifiedAt)
-		}
-		if candidates[left].Account.ConsecutiveFailures != candidates[right].Account.ConsecutiveFailures {
-			return candidates[left].Account.ConsecutiveFailures < candidates[right].Account.ConsecutiveFailures
-		}
-		if !candidates[left].Account.LastUsedAt.Equal(candidates[right].Account.LastUsedAt) {
-			if candidates[left].Account.LastUsedAt.IsZero() {
-				return true
-			}
-			if candidates[right].Account.LastUsedAt.IsZero() {
-				return false
-			}
-			return candidates[left].Account.LastUsedAt.Before(candidates[right].Account.LastUsedAt)
-		}
-		return candidates[left].Account.ID < candidates[right].Account.ID
-	})
 	return candidates
 }
 

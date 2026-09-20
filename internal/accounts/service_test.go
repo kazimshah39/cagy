@@ -808,3 +808,42 @@ func TestSetDefaultAccountChangesOnlyCatalogMetadata(t *testing.T) {
 		t.Fatal("default reconciliation touched credential state")
 	}
 }
+
+func TestRotationObservationAndFailureAdvanceCursor(t *testing.T) {
+	service, _, _, _, old, target := serviceFixture(t)
+	now := service.Now()
+	quota := QuotaSnapshot{Class: QuotaExhausted, ObservedAt: now}
+	if err := service.RecordRotationObservation(old.ID, quota); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ := service.Repository.LoadCatalog()
+	if loaded.Rotation == nil || loaded.Rotation.CursorAccountID != old.ID {
+		t.Fatalf("rotation=%+v", loaded.Rotation)
+	}
+	if err := service.RecordRotationFailure(target.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ = service.Repository.LoadCatalog()
+	got, _ := loaded.Find(target.ID)
+	if loaded.Rotation.CursorAccountID != target.ID || got.ConsecutiveFailures != 1 || got.CooldownUntil.IsZero() {
+		t.Fatalf("cursor=%+v account=%+v", loaded.Rotation, got)
+	}
+}
+
+func TestSwitchAutomaticAdvancesCursorButManualSwitchDoesNot(t *testing.T) {
+	service, _, _, _, old, target := serviceFixture(t)
+	if _, err := service.Switch(context.Background(), target.ID); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ := service.Repository.LoadCatalog()
+	if loaded.Rotation.CursorAccountID != "" {
+		t.Fatalf("manual switch advanced cursor=%s", loaded.Rotation.CursorAccountID)
+	}
+	if _, err := service.SwitchAutomatic(context.Background(), old.ID); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ = service.Repository.LoadCatalog()
+	if loaded.Rotation.CursorAccountID != old.ID {
+		t.Fatalf("automatic switch cursor=%s want=%s", loaded.Rotation.CursorAccountID, old.ID)
+	}
+}

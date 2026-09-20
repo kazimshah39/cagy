@@ -66,11 +66,6 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		}
 	}
 	originalID := currentID
-	if currentID != "" && !trigger.ObservedAt.IsZero() {
-		if err := service.RecordQuota(currentID, trigger.snapshot()); err != nil {
-			return "", developer, fmt.Errorf("record exhausted agy account: %w", err)
-		}
-	}
 
 	sessionID, sessionErr := exactAgySessionID(developer)
 	if sessionErr != nil && taskStarted {
@@ -90,21 +85,6 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 	if currentID != "" {
 		attempted[currentID] = struct{}{}
 	}
-	missing, err := missingAccountCredentials(ctx, service, catalog)
-	if err != nil {
-		return "", developer, err
-	}
-	candidates := accounts.SelectCandidates(catalog, accounts.SelectionOptions{
-		CurrentID:          currentID,
-		AttemptedIDs:       attempted,
-		MissingVaultIDs:    missing,
-		Now:                a.now().UTC(),
-		MaxVerificationAge: recoveryQuotaCacheAge,
-	})
-	a.debugf("recovery candidates task=%q current=%q candidates=%d missing=%d", taskID, debugAccountID(currentID), len(candidates), len(missing))
-	if len(candidates) == 0 {
-		return "", developer, noRecoveryAccountError(catalog, missing, recoverySummary{})
-	}
 
 	// A final response can race the quota detector. Deliver it instead of
 	// stopping or continuing a task that has already finished.
@@ -115,149 +95,141 @@ func (a *App) recover(ctx context.Context, info runtimeContext, developer herdr.
 		}
 	}
 
+	if currentID != "" {
+		if err := service.RecordRotationObservation(currentID, trigger.snapshot()); err != nil {
+			return "", developer, fmt.Errorf("record exhausted agy account: %w", err)
+		}
+	}
+	catalog, err = service.Repository.LoadCatalog()
+	if err != nil {
+		return "", developer, err
+	}
+	missing, err := missingAccountCredentials(ctx, service, catalog)
+	if err != nil {
+		return "", developer, err
+	}
+	candidates := accounts.SelectCandidates(catalog, accounts.SelectionOptions{CurrentID: currentID, AttemptedIDs: attempted, MissingVaultIDs: missing, Now: a.now().UTC(), MaxVerificationAge: recoveryQuotaCacheAge})
+	a.debugf("recovery candidates task=%q current=%q candidates=%d missing=%d", taskID, debugAccountID(currentID), len(candidates), len(missing))
+	if len(candidates) == 0 {
+		return "", developer, noRecoveryAccountError(catalog, missing, recoverySummary{})
+	}
+
 	fmt.Fprintln(a.stderr, "cagy: quota is low; switching to another stored account automatically")
 	if err := a.stopForRecovery(ctx, info.developer); err != nil {
 		return "", developer, fmt.Errorf("stop quota-limited agy before account switch: %w", err)
 	}
 	developerRunning := false
-	summary := recoverySummary{}
-
-	for {
-		catalog, err = service.Repository.LoadCatalog()
-		if err != nil {
-			return "", developer, fmt.Errorf("reload stored agy accounts: %w", err)
-		}
-		missing, err = missingAccountCredentials(ctx, service, catalog)
-		if err != nil {
-			return "", developer, err
-		}
-		candidates = accounts.SelectCandidates(catalog, accounts.SelectionOptions{
-			CurrentID:          currentID,
-			AttemptedIDs:       attempted,
-			MissingVaultIDs:    missing,
-			Now:                a.now().UTC(),
-			MaxVerificationAge: recoveryQuotaCacheAge,
-		})
-		if len(candidates) == 0 {
-			break
-		}
-		candidate := candidates[0]
-		attempted[candidate.Account.ID] = struct{}{}
-		summary.attempted++
-		a.debugf("recovery attempt task=%q number=%d account=%q tier=%q", taskID, summary.attempted, debugAccountID(candidate.Account.ID), candidate.Tier)
-
-		activated, switchErr := service.Switch(ctx, candidate.Account.ID)
-		if switchErr != nil {
-			summary.failed++
-			permanent := accounts.CredentialFailureNeedsLogin(switchErr)
-			_ = service.RecordAccountFailure(candidate.Account.ID, permanent)
-			a.debugf("recovery switch-failed task=%q account=%q permanent=%t error=%q", taskID, debugAccountID(candidate.Account.ID), permanent, switchErr)
-			continue
-		}
-		currentID = activated.ID
-
-		restarted, restartErr := a.startForRecovery(ctx, info, paneID, sessionID)
-		if restartErr != nil {
-			a.debugf("recovery restart-failed task=%q account=%q error=%q", taskID, debugAccountID(candidate.Account.ID), restartErr)
-			// A pane/startup failure is not evidence that this account is bad.
-			// Trying every remaining credential would only churn the canonical
-			// account and incorrectly place healthy accounts on cooldown. Restore
-			// the original account and visible developer once, then stop clearly.
-			restored, restoreErr := a.restoreRecoveryDeveloper(ctx, info, service, paneID, sessionID, originalID)
-			if restoreErr == nil {
-				developer = restored
-				return "", developer, fmt.Errorf("restart agy after automatic account switch: %w; original developer was restored", restartErr)
+	var finalOutput string
+	var terminalErr error
+	terminalAgent := developer
+	rotation, rotateErr := a.rotateAccounts(ctx, service, currentID, trigger, attempted, rotationHooks{
+		AfterSwitch: func(ctx context.Context, activated accounts.Account) error {
+			restarted, err := a.startForRecovery(ctx, info, paneID, sessionID)
+			if err != nil {
+				return fmt.Errorf("restart agy after automatic account switch: %w", err)
 			}
-			return "", developer, fmt.Errorf("restart agy after automatic account switch: %w; original developer could not be restored: %v", restartErr, restoreErr)
-		}
-		developer = restarted
-		developerRunning = true
-
-		probe := a.probeForRecovery(ctx, info.developer)
-		if err := service.RecordQuota(candidate.Account.ID, probe.snapshot()); err != nil {
-			return "", developer, fmt.Errorf("record candidate quota: %w", err)
-		}
-		a.debugf("recovery candidate-quota task=%q account=%q class=%q reason=%q", taskID, debugAccountID(candidate.Account.ID), probe.Class, probe.Reason)
-		switch probe.Class {
-		case quotaAvailable:
-			if err := a.bindForRecovery(ctx, info.developer, paneID, candidate.Account.ID); err != nil {
-				return "", developer, err
+			developer = restarted
+			terminalAgent = restarted
+			developerRunning = true
+			currentID = activated.ID
+			return nil
+		},
+		Probe: func(ctx context.Context) quotaProbeResult {
+			probe := a.probeForRecovery(ctx, info.developer)
+			a.debugf("recovery candidate-quota task=%q current=%q class=%q reason=%q", taskID, debugAccountID(currentID), probe.Class, probe.Reason)
+			return probe
+		},
+		Reject: func(ctx context.Context, _ accounts.Account, probe quotaProbeResult) error {
+			if err := a.stopForRecovery(ctx, info.developer); err != nil {
+				return fmt.Errorf("stop rejected account (%s): %w", probe.Class, err)
+			}
+			developerRunning = false
+			return nil
+		},
+		Accept: func(ctx context.Context, activated accounts.Account, _ quotaProbeResult) error {
+			if err := a.bindForRecovery(ctx, info.developer, paneID, activated.ID); err != nil {
+				return err
 			}
 			fmt.Fprintln(a.stderr, "cagy: healthy stored account selected; continuing the task")
-		case quotaLow, quotaExhausted:
-			summary.low++
-			if err := a.stopForRecovery(ctx, info.developer); err != nil {
-				return "", developer, fmt.Errorf("stop low-quota candidate: %w", err)
+			return nil
+		},
+		RunAccepted: func(ctx context.Context, activated accounts.Account, _ quotaProbeResult) (bool, error) {
+			prompt := originalTask
+			phase := taskPhaseSubmitting
+			if taskStarted {
+				prompt = continuationPrompt(originalTask)
+				phase = taskPhaseMonitoring
 			}
-			developerRunning = false
-			continue
-		default:
-			summary.unknown++
-			_ = service.RecordAccountFailure(candidate.Account.ID, false)
-			if err := a.stopForRecovery(ctx, info.developer); err != nil {
-				return "", developer, fmt.Errorf("stop unverifiable account candidate: %w", err)
+			checkpoint, err := a.checkpointForRecovery(developer)
+			if err != nil {
+				return false, fmt.Errorf("prepare recovered agy transcript: %w", err)
 			}
-			developerRunning = false
-			continue
-		}
-
-		prompt := originalTask
-		phase := taskPhaseSubmitting
-		if taskStarted {
-			prompt = continuationPrompt(originalTask)
-			phase = taskPhaseMonitoring
-		}
-		checkpoint, checkpointErr := a.checkpointForRecovery(developer)
-		if checkpointErr != nil {
-			return "", developer, fmt.Errorf("prepare recovered agy transcript: %w", checkpointErr)
-		}
-		if err := a.replaceTrackedPrompt(developer, prompt, checkpoint, phase); err != nil {
-			return "", developer, fmt.Errorf("update recovered task state: %w", err)
-		}
-		result, taskErr := a.runTaskForRecovery(ctx, info.developer, prompt, checkpoint)
-		if result.needsQuotaRecovery() {
+			if err := a.replaceTrackedPrompt(developer, prompt, checkpoint, phase); err != nil {
+				return false, fmt.Errorf("update recovered task state: %w", err)
+			}
+			result, taskErr := a.runTaskForRecovery(ctx, info.developer, prompt, checkpoint)
 			if result.agent.PaneID != "" {
 				developer = result.agent
+				terminalAgent = result.agent
 			}
-			if output, found := a.completedTrackedPrompt(developer, prompt); found {
-				return output, developer, nil
+			if result.needsQuotaRecovery() {
+				if output, found := a.completedTrackedPrompt(developer, prompt); found {
+					finalOutput = output
+					return false, nil
+				}
+				if err := service.RecordRotationObservation(activated.ID, result.quota.snapshot()); err != nil {
+					return false, fmt.Errorf("record newly exhausted agy: %w", err)
+				}
+				currentPrompt = prompt
+				taskStarted = true
+				if err := a.stopForRecovery(ctx, info.developer); err != nil {
+					return false, fmt.Errorf("stop newly exhausted agy: %w", err)
+				}
+				developerRunning = false
+				return true, nil
 			}
-			_ = service.RecordQuota(candidate.Account.ID, result.quota.snapshot())
-			currentPrompt = prompt
-			taskStarted = true
-			trigger = result.quota
-			if err := a.stopForRecovery(ctx, info.developer); err != nil {
-				return "", developer, fmt.Errorf("stop newly exhausted agy: %w", err)
+			if taskErr != nil {
+				terminalErr = taskErr
+				return false, nil
 			}
-			developerRunning = false
-			continue
-		}
-		if taskErr != nil {
-			return "", result.agent, taskErr
-		}
-		if result.agent.AgentStatus == "blocked" {
-			a.warnTrackedPhase(taskPhaseBlocked, result.agent)
-			return "", result.agent, errors.New("developer is blocked; check the right pane")
-		}
-		if strings.TrimSpace(result.output) == "" {
-			return "", result.agent, errors.New("agy finished without readable output")
-		}
-		return strings.TrimSpace(result.output), result.agent, nil
+			if result.agent.AgentStatus == "blocked" {
+				a.warnTrackedPhase(taskPhaseBlocked, result.agent)
+				terminalErr = errors.New("developer is blocked; check the right pane")
+				return false, nil
+			}
+			if strings.TrimSpace(result.output) == "" {
+				terminalErr = errors.New("agy finished without readable output")
+				return false, nil
+			}
+			finalOutput = strings.TrimSpace(result.output)
+			return false, nil
+		},
+	})
+	if terminalErr != nil {
+		return "", terminalAgent, terminalErr
 	}
-
+	if finalOutput != "" {
+		return finalOutput, developer, nil
+	}
+	if rotateErr == nil {
+		return "", developer, errors.New("agy recovery finished without task output")
+	}
 	if developerRunning {
 		_ = a.stopForRecovery(ctx, info.developer)
 	}
 	restored, restoreErr := a.restoreRecoveryDeveloper(ctx, info, service, paneID, sessionID, originalID)
 	if restoreErr == nil {
 		developer = restored
+		if !trigger.ObservedAt.IsZero() {
+			_ = service.RecordQuota(originalID, trigger.snapshot())
+		}
 	}
-	a.debugf("recovery exhausted task=%q attempted=%d low=%d unknown=%d failed=%d restored=%t restore_error=%q", taskID, summary.attempted, summary.low, summary.unknown, summary.failed, restoreErr == nil, restoreErr)
-	poolErr := noRecoveryAccountError(catalog, missing, summary)
+	a.debugf("recovery exhausted task=%q attempted=%d low=%d unknown=%d failed=%d restored=%t restore_error=%q", taskID, rotation.Summary.Attempted, rotation.Summary.Low, rotation.Summary.Unknown, rotation.Summary.Failed, restoreErr == nil, restoreErr)
 	if restoreErr != nil {
-		return "", developer, fmt.Errorf("%w; original developer could not be restored: %v", poolErr, restoreErr)
+		return "", developer, fmt.Errorf("%w; original developer could not be restored: %v", rotateErr, restoreErr)
 	}
-	return "", developer, poolErr
+	return "", developer, fmt.Errorf("%w; original developer was restored", rotateErr)
+
 }
 
 func missingAccountCredentials(ctx context.Context, service *accounts.AccountService, catalog accounts.Catalog) (map[string]struct{}, error) {

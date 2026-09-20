@@ -82,3 +82,60 @@ func TestTransactionValidation(t *testing.T) {
 		t.Fatal("expected invalid phase rejection")
 	}
 }
+
+func TestCatalogNormalizesLegacyRotationOrder(t *testing.T) {
+	first := testAccount(t, "first", "First", "first@example.com")
+	second := testAccount(t, "second", "Second", "second@example.com")
+	catalog := Catalog{Version: CatalogVersion, DefaultAccountID: second.ID, Accounts: []Account{first, second}}
+	if err := catalog.NormalizeRotation(time.Unix(10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := catalog.Rotation.Order, []string{second.ID, first.ID}; !equalStrings(got, want) {
+		t.Fatalf("order=%v want=%v", got, want)
+	}
+}
+
+func TestRotationStateRejectsDuplicateUnknownAndBadCursor(t *testing.T) {
+	account := testAccount(t, "one", "One", "one@example.com")
+	ids := map[string]struct{}{account.ID: {}}
+	bad := RotationState{Order: []string{account.ID, account.ID}}
+	if err := bad.Validate(ids); err == nil {
+		t.Fatal("duplicate rotation order accepted")
+	}
+	bad = RotationState{Order: []string{account.ID, strings.Repeat("a", 64)}}
+	if err := bad.Validate(ids); err == nil {
+		t.Fatal("unknown rotation ID accepted")
+	}
+	bad = RotationState{Order: []string{account.ID}, CursorAccountID: strings.Repeat("b", 64), UpdatedAt: time.Unix(1, 0)}
+	if err := bad.Validate(ids); err == nil {
+		t.Fatal("unknown cursor accepted")
+	}
+}
+
+func TestRemoveRotationAccountPreservesLogicalSuccessor(t *testing.T) {
+	a := testAccount(t, "a", "A", "a@example.com")
+	b := testAccount(t, "b", "B", "b@example.com")
+	c := testAccount(t, "c", "C", "c@example.com")
+	catalog := Catalog{Version: CatalogVersion, Accounts: []Account{a, b, c}, Rotation: &RotationState{Order: []string{a.ID, b.ID, c.ID}, CursorAccountID: b.ID, UpdatedAt: time.Unix(1, 0)}}
+	if err := catalog.RemoveRotationAccount(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Rotation.CursorAccountID != a.ID {
+		t.Fatalf("cursor=%s want=%s", catalog.Rotation.CursorAccountID, a.ID)
+	}
+	if got := catalog.Rotation.Order; !equalStrings(got, []string{a.ID, c.ID}) {
+		t.Fatalf("order=%v", got)
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}

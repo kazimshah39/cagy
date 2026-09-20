@@ -13,22 +13,28 @@ func selectorAccount(id string, state State, verified time.Time, quotaClass Quot
 	return account
 }
 
-func TestSelectCandidatesRanksKnownAvailableBeforeNeedsProbe(t *testing.T) {
-	now := time.Unix(1000, 0).UTC()
-	known := selectorAccount("known", StateHealthy, now.Add(-time.Minute), QuotaAvailable, .7, .8)
-	unknown := selectorAccount("unknown", StateUnknown, now.Add(-time.Minute), QuotaUnknown, 0, 0)
-	staleLow := selectorAccount("stale-low", StateLowQuota, now.Add(-time.Hour), QuotaExhausted, 0, 0)
+func rotationCatalog(accounts ...Account) Catalog {
+	catalog := Catalog{Version: CatalogVersion, Accounts: accounts}
+	for _, account := range accounts {
+		catalog.Rotation = &RotationState{Order: append(catalog.RotationOrder(), account.ID)}
+	}
+	return catalog
+}
 
-	got := SelectCandidates(Catalog{Accounts: []Account{unknown, staleLow, known}}, SelectionOptions{Now: now})
-	if len(got) != 3 {
-		t.Fatalf("candidates=%d want=3", len(got))
-	}
-	if got[0].Account.ID != known.ID || got[0].Tier != CandidateKnownAvailable {
-		t.Fatalf("first=%+v", got[0])
-	}
-	for _, candidate := range got[1:] {
-		if candidate.Tier != CandidateNeedsProbe {
-			t.Fatalf("candidate=%+v want needs_probe", candidate)
+func TestSelectCandidatesUsesCircularOrderAfterCursor(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	a := selectorAccount("a", StateHealthy, now, QuotaAvailable, .8, .8)
+	b := selectorAccount("b", StateHealthy, now, QuotaAvailable, .2, .2)
+	c := selectorAccount("c", StateHealthy, now, QuotaAvailable, .7, .7)
+	d := selectorAccount("d", StateHealthy, now, QuotaAvailable, .9, .9)
+	catalog := rotationCatalog(a, b, c, d)
+	catalog.Rotation.CursorAccountID = b.ID
+	catalog.Rotation.UpdatedAt = now
+	got := SelectCandidates(catalog, SelectionOptions{Now: now})
+	want := []string{"c", "d", "a", "b"}
+	for i, id := range want {
+		if got[i].Account.ID != id {
+			t.Fatalf("index=%d got=%s want=%s", i, got[i].Account.ID, id)
 		}
 	}
 }
@@ -49,13 +55,8 @@ func TestSelectCandidatesExcludesUnsafeAccounts(t *testing.T) {
 	freshLow := selectorAccount("fresh-low", StateLowQuota, now, QuotaLow, .01, .9)
 	freshExhausted := selectorAccount("fresh-exhausted", StateLowQuota, now, QuotaExhausted, 0, .9)
 	boundary := selectorAccount("boundary", StateHealthy, now, QuotaAvailable, WeeklySwitchThreshold, .9)
-
-	got := SelectCandidates(Catalog{Accounts: []Account{base, current, attempted, missing, disabled, needsLogin, cooldown, freshLow, freshExhausted, boundary}}, SelectionOptions{
-		CurrentID:       current.ID,
-		AttemptedIDs:    map[string]struct{}{attempted.ID: {}},
-		MissingVaultIDs: map[string]struct{}{missing.ID: {}},
-		Now:             now,
-	})
+	catalog := rotationCatalog(base, current, attempted, missing, disabled, needsLogin, cooldown, freshLow, freshExhausted, boundary)
+	got := SelectCandidates(catalog, SelectionOptions{CurrentID: current.ID, AttemptedIDs: map[string]struct{}{attempted.ID: {}}, MissingVaultIDs: map[string]struct{}{missing.ID: {}}, Now: now})
 	if len(got) != 1 || got[0].Account.ID != base.ID {
 		t.Fatalf("got=%+v", got)
 	}
@@ -64,27 +65,18 @@ func TestSelectCandidatesExcludesUnsafeAccounts(t *testing.T) {
 func TestSelectCandidatesStaleLowBecomesProbeCandidate(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	account := selectorAccount("stale", StateLowQuota, now.Add(-11*time.Minute), QuotaExhausted, 0, 0)
-	got := SelectCandidates(Catalog{Accounts: []Account{account}}, SelectionOptions{Now: now, MaxVerificationAge: 10 * time.Minute})
+	got := SelectCandidates(rotationCatalog(account), SelectionOptions{Now: now, MaxVerificationAge: 10 * time.Minute})
 	if len(got) != 1 || got[0].Tier != CandidateNeedsProbe {
 		t.Fatalf("got=%+v", got)
 	}
 }
 
-func TestSelectCandidatesTieBreaksDeterministically(t *testing.T) {
+func TestSelectCandidatesDoesNotReorderByQuotaScore(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
-	olderUsed := selectorAccount("older-used", StateHealthy, now, QuotaAvailable, .8, .8)
-	olderUsed.LastUsedAt = now.Add(-2 * time.Hour)
-	newerUsed := selectorAccount("newer-used", StateHealthy, now, QuotaAvailable, .8, .8)
-	newerUsed.LastUsedAt = now.Add(-time.Hour)
-	failed := selectorAccount("failed", StateHealthy, now, QuotaAvailable, .8, .8)
-	failed.ConsecutiveFailures = 1
-	neverUsed := selectorAccount("never-used", StateHealthy, now, QuotaAvailable, .8, .8)
-
-	got := SelectCandidates(Catalog{Accounts: []Account{newerUsed, failed, olderUsed, neverUsed}}, SelectionOptions{Now: now})
-	want := []string{"never-used", "older-used", "newer-used", "failed"}
-	for index, id := range want {
-		if got[index].Account.ID != id {
-			t.Fatalf("index=%d got=%s want=%s all=%+v", index, got[index].Account.ID, id, got)
-		}
+	low := selectorAccount("low", StateHealthy, now, QuotaAvailable, .2, .2)
+	high := selectorAccount("high", StateHealthy, now, QuotaAvailable, .9, .9)
+	got := SelectCandidates(rotationCatalog(low, high), SelectionOptions{Now: now})
+	if got[0].Account.ID != low.ID || got[1].Account.ID != high.ID {
+		t.Fatalf("got=%+v", got)
 	}
 }

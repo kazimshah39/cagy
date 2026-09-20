@@ -222,6 +222,7 @@ cagy accounts import-active
 cagy accounts list
 cagy accounts status [ACCOUNT]
 cagy accounts switch ACCOUNT
+cagy accounts switch --auto
 cagy accounts remove ACCOUNT --yes
 cagy accounts doctor
 cagy accounts export --output FILE
@@ -243,6 +244,8 @@ export CAGY_GOOGLE_CLIENT_SECRET="your-google-oauth-client-secret"
 Keep those values in your local shell configuration only; never commit them to this repository. Imported accounts can still be listed and inspected without opening OAuth.
 
 `cagy accounts switch ACCOUNT` does not run agy and does not open OAuth. It refreshes the selected stored credential directly with Google, verifies the account identity, and then replaces agy's canonical Keychain item using the same delete-and-add, allow-all flow as AGM. This avoids legacy ACL password prompts. Restart the active agy/cagy session after switching so the new process reads the selected account.
+
+`cagy accounts switch --auto` is the standalone one-shot failover command. It checks the current cagy-managed account first. If the quota is healthy, it does nothing. If quota is low or exhausted, it checks stored accounts in a persistent round-robin order (for example A → B → C → D → A), starting after the last attempted account. It skips disabled, missing, needs-login, cooling-down, recently exhausted, and already-attempted accounts; refreshes and identity-validates each credential; then performs a live `/model` and `/quota` check before accepting it. Each invocation makes at most one pass through the account pool and never opens OAuth, calls Herdr, or manages a running GUI/agy process. Quit standalone agy before running it, and restart agy after a successful switch.
 
 Before each delegated task, cagy checks agy's real `/model` and `/quota` status. During a task it polls visible state every second, probes agy's current session every 45 seconds, and treats 150 seconds without meaningful progress as a healthy-stall candidate. Five-minute messages are only user-facing heartbeats; the overall task deadline is 30 minutes. If quota is low, cagy automatically rotates through eligible stored accounts. Before work starts, the original task is submitted exactly once after a healthy account is active. After work starts, cagy resumes the exact conversation and sends only a generic continuation instruction, never the original prompt again. A transient Herdr `idle` or `done` state does not finish the task.
 
@@ -268,7 +271,7 @@ cagy ask --forget
 
 `--forget` refuses while the developer is still visibly working. A crashed caller's lock is reclaimed only after its recorded process is confirmed dead; a live lock remains exclusive.
 
-cagy classifies the active agy session's quota as available, low, exhausted, or unknown. Unknown or malformed results never trigger switching. When quota is confirmed low or exhausted, cagy automatically tries each eligible stored account at most once. Fresh known-good accounts are preferred; stale or unknown accounts are refreshed, identity-validated, started, and live-probed before use. Fresh low/exhausted, disabled, needs-login, missing-credential, current, cooling-down, and already-attempted accounts are skipped. A successful account becomes the active default and is bound to the visible developer pane. If every reusable account is unavailable, cagy restores the original visible developer when safe and prints one clear instruction to add or refresh an account. It never opens OAuth automatically.
+cagy classifies the active agy session's quota as available, low, exhausted, or unknown. Unknown or malformed results never trigger switching. When quota is confirmed low or exhausted, cagy uses the same persistent round-robin rotation engine as `switch --auto`. The order and cursor are stored as non-secret catalog metadata and survive process/Mac restarts; each cycle makes at most one pass, then wraps on a later cycle. Fresh low/exhausted, disabled, needs-login, missing-credential, current, cooling-down, and already-attempted accounts are skipped. Every candidate is refreshed, identity-validated, started, and live-probed before use. A successful account becomes the active default and is bound to the visible developer pane. If every reusable account is unavailable, cagy restores the original visible developer when safe and prints one clear instruction to add or refresh an account. It never opens OAuth automatically.
 
 ## Diagnostic logs
 

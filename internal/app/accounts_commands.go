@@ -124,8 +124,11 @@ func (a *App) accountsCommand(ctx context.Context, args []string) (runErr error)
 	case "add":
 		return a.accountsAdd(ctx, service, args[1:])
 	case "switch":
-		if len(args) != 2 || args[1] == "" {
-			return errors.New("usage: cagy accounts switch ACCOUNT")
+		if len(args) == 2 && args[1] == "--auto" {
+			return a.accountsSwitchAuto(ctx, service)
+		}
+		if len(args) != 2 || args[1] == "" || strings.HasPrefix(args[1], "--") {
+			return errors.New("usage: cagy accounts switch ACCOUNT | cagy accounts switch --auto")
 		}
 		catalog, err := service.Repository.LoadCatalog()
 		if err != nil {
@@ -183,6 +186,44 @@ func (a *App) accountsCommand(ctx context.Context, args []string) (runErr error)
 	default:
 		return fmt.Errorf("unknown cagy accounts command %q", args[0])
 	}
+}
+
+func (a *App) accountsSwitchAuto(ctx context.Context, service *accounts.AccountService) error {
+	catalog, err := service.Repository.LoadCatalog()
+	if err != nil {
+		return err
+	}
+	currentID := strings.TrimSpace(catalog.DefaultAccountID)
+	if currentID == "" {
+		return errors.New("no default cagy account is configured; run cagy accounts import-active or cagy accounts add")
+	}
+	current, found := catalog.Find(currentID)
+	if !found {
+		return errors.New("default cagy account is not present in the account catalog")
+	}
+	probe := a.probeAgyQuota(ctx)
+	switch probe.Class {
+	case quotaAvailable:
+		fmt.Fprintf(a.stdout, "Current account %s (%s) is healthy; no switch needed\n", current.Label, current.Email)
+		return nil
+	case quotaUnknown:
+		return fmt.Errorf("cannot auto-switch because current account quota is unknown: %s", probe.Reason)
+	}
+	result, err := a.rotateAccounts(ctx, service, current.ID, probe, map[string]struct{}{}, rotationHooks{
+		Probe: func(ctx context.Context) quotaProbeResult { return a.probeAgyQuota(ctx) },
+	})
+	if err != nil {
+		// Restore the original canonical credential without moving the cursor;
+		// then reapply its confirmed quota evidence instead of replacing it with
+		// the validator's temporary unknown result.
+		if _, restoreErr := service.Switch(ctx, current.ID); restoreErr == nil {
+			_ = service.RecordQuota(current.ID, probe.snapshot())
+		}
+		return err
+	}
+	weekly, five := debugQuotaRemaining(result.Quota.WeeklyRemaining), debugQuotaRemaining(result.Quota.FiveHourRemaining)
+	fmt.Fprintf(a.stdout, "Switched to %s (%s); weekly remaining %s, five-hour remaining %s. Restart agy to use this account.\n", result.Account.Label, result.Account.Email, weekly, five)
+	return nil
 }
 
 func (a *App) accountsList(service *accounts.AccountService) error {

@@ -193,12 +193,16 @@ agy -p "/quota" --output-format json --print-timeout 30s
 
 The active model chooses either `Gemini Models` or `Claude and GPT models`. The account is healthy only when weekly quota is above 3% and 5-hour quota is above 2%. A weekly `remaining_fraction` of 0.03 or lower, or a 5-hour value of 0.02 or lower, triggers recovery. Unknown models, missing groups, malformed data, and failed probes never trigger an account switch by themselves.
 
+## Persistent Account Rotation
+
+The account catalog stores a non-secret rotation order of stable account IDs, a cursor identifying the last attempted/selected account, and its update time. Legacy catalogs are normalized deterministically with the current default first, followed by existing account order. New accounts append; removals preserve the logical circular successor. Both delegated-task recovery and `cagy accounts switch --auto` use the same health-filtered round-robin engine. Each cycle makes one bounded pass, advances the cursor for every attempt, live-probes each candidate after identity validation, and wraps on a later cycle. `switch --auto` is a foreground command only: it does not start a daemon, call Herdr, launch OAuth, or control an unrelated running agy/GUI process; the user quits/restarts standalone agy around the command.
+
 ## Visible Transactional Native Account Recovery
 
 When a typed agy probe or strong provider output confirms low or exhausted quota, cagy performs automatic recovery. Spinner-only output, malformed probes, and unknown errors never trigger account changes.
 
 1. Persist the current account's quota state and task journal before mutation.
-2. Build a deterministic candidate list: fresh known-available accounts first, then stale/unknown accounts that need a live probe. Exclude the current, attempted, missing-credential, disabled, needs-login, active-cooldown, and fresh low/exhausted accounts.
+2. Use the persistent account rotation order and cursor to build one circular candidate pass beginning after the current exhausted account. Exclude the current, attempted, missing-credential, disabled, needs-login, active-cooldown, and fresh low/exhausted accounts; health filters eligibility but does not reorder the persistent sequence.
 3. Verify pane ownership, workspace, project, developer target, and conversation identity.
 4. Stop the developer and confirm target release before changing the canonical credential.
 5. For each candidate once: refresh and verify identity, activate through the non-interactive canonical Keychain transaction, restart agy in the same pane, and live-probe `/model` and `/quota`. Persist every result.
@@ -278,7 +282,7 @@ cagy/
 - cagy closes only the developer pane it can verify in the current workspace and project.
 - No credentials or complete environment dumps are logged.
 - Visible state is polled every second, bound quota every 45 seconds, healthy stalls at 150 seconds, heartbeats every five minutes, and the overall task budget is 30 minutes; recovery never loops forever.
-- Startup, repair, doctor, and quota probes cannot touch the canonical Keychain item; low quota requires an explicit user account change.
+- Startup, repair, doctor, and quota probes cannot touch the canonical Keychain item; confirmed low quota uses the bounded automatic rotation path, while unknown quota never triggers switching.
 
 ## Automated Validation
 

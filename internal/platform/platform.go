@@ -5,9 +5,9 @@ import (
 	"runtime"
 )
 
-const unsupportedMessage = "cagy supports only Apple Silicon macOS (darwin/arm64)"
+const unsupportedMessage = "herdr-tandem supports only Apple Silicon macOS (darwin/arm64)"
 
-// Validate enforces cagy's intentionally narrow runtime support contract.
+// Validate enforces herdr-tandem's intentionally narrow runtime support contract.
 func Validate(goos, goarch string) error {
 	if goos != "darwin" || goarch != "arm64" {
 		return fmt.Errorf("%s", unsupportedMessage)

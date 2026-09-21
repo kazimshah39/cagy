@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
 )
 
 func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr error) {
@@ -23,21 +24,26 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 	if err := a.requireHerdr(); err != nil {
 		return err
 	}
-	if err := a.requireExecutables("herdr", "codex", "agy"); err != nil {
+	if err := a.requireExecutables("herdr", a.supervisor.Executable(), a.developerAdapter.Executable()); err != nil {
+		return err
+	}
+	if err := a.supervisor.Validate(ctx, a.runner); err != nil {
 		return err
 	}
 	if err := a.checkAgyIntegration(ctx); err != nil {
 		return err
 	}
-	if err := a.checkRouter(ctx); err != nil {
-		return err
+	if a.developerAdapter.RequiresProviderService() {
+		if err := a.checkProviderService(ctx); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(a.getenv("HERDR_SOCKET_PATH")) == "" {
 		return fmt.Errorf("herdr socket path is missing")
 	}
 	binPath, err := a.resolveExecutable()
 	if err != nil {
-		return fmt.Errorf("resolve cagy executable: %w", err)
+		return fmt.Errorf("resolve herdr-tandem executable: %w", err)
 	}
 	current, err := a.herdr.CurrentPane(ctx)
 	if err != nil {
@@ -51,15 +57,15 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		return fmt.Errorf("herdr current pane is in another workspace")
 	}
 	if strings.TrimSpace(current.TabID) == "" {
-		return fmt.Errorf("cagy supervisor tab is missing")
+		return fmt.Errorf("herdr-tandem supervisor tab is missing")
 	}
 	developerName := developerName(workspaceID, current.PaneID)
-	startInfo := runtimeContext{workspaceID: workspaceID, supervisor: current.PaneID, developer: developerName, project: project}
+	startInfo := runtimeContext{supervisorKind: a.supervisor.ID(), developerKind: a.developerAdapter.ID(), workspaceID: workspaceID, supervisor: current.PaneID, developer: developerName, project: project}
 	buildRevision := "unknown"
 	if a.runningBuild != nil {
 		buildRevision = a.runningBuild().Fingerprint()
 	}
-	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{BuildRevision: buildRevision, WorkspaceID: workspaceID, SupervisorPaneID: current.PaneID, Developer: developerName, Project: project})
+	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{BuildRevision: buildRevision, SupervisorKind: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), WorkspaceID: workspaceID, SupervisorPaneID: current.PaneID, Developer: developerName, Project: project})
 	if err != nil {
 		return err
 	}
@@ -71,20 +77,20 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 	}()
 
 	if err := a.markPaneRole(ctx, current.PaneID, developerName, "supervisor"); err != nil {
-		return fmt.Errorf("mark cagy supervisor: %w", err)
+		return fmt.Errorf("mark herdr-tandem supervisor: %w", err)
 	}
 	if err := a.herdr.ReportPaneRuntime(ctx, current.PaneID, paneOwnershipSource, prepared.RuntimeID, buildRevision); err != nil {
-		return fmt.Errorf("mark cagy supervisor runtime: %w", err)
+		return fmt.Errorf("mark herdr-tandem supervisor runtime: %w", err)
 	}
 	supervisorDisplayName := compactSupervisorDisplayName
 	if showAgents {
 		supervisorDisplayName = expandedSupervisorDisplayName
 	}
-	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, "codex", supervisorDisplayName); err != nil {
-		return fmt.Errorf("label cagy supervisor: %w", err)
+	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, a.supervisor.ID(), supervisorDisplayName); err != nil {
+		return fmt.Errorf("label herdr-tandem supervisor: %w", err)
 	}
 	if err := a.configureSidebar(ctx, showAgents); err != nil {
-		return fmt.Errorf("configure cagy sidebar: %w", err)
+		return fmt.Errorf("configure herdr-tandem sidebar: %w", err)
 	}
 
 	developer, getErr := a.herdr.GetAgent(ctx, developerName)
@@ -93,7 +99,7 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		if removeErr := a.runtimeManager().Remove(prepared.RuntimeID); removeErr != nil {
 			return fmt.Errorf("existing agy developer requires restart, and prepared runtime cleanup failed: %w", removeErr)
 		}
-		return fmt.Errorf("an existing agy developer is not owned by this cagy runtime; run cagy stop, then restart cagy")
+		return fmt.Errorf("an existing agy developer is not owned by this herdr-tandem runtime; run herdr-tandem stop, then restart herdr-tandem")
 	case herdr.IsCode(getErr, "agent_not_found"):
 		pane, splitErr := a.herdr.SplitRight(ctx, project)
 		if splitErr != nil {
@@ -103,7 +109,7 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
 			return fmt.Errorf("new developer pane is unsafe: %w", err)
 		}
-		_ = a.herdr.RenamePane(ctx, current.PaneID, "Codex Supervisor")
+		_ = a.herdr.RenamePane(ctx, current.PaneID, a.supervisor.DisplayName()+" Supervisor")
 		_ = a.herdr.RenamePane(ctx, pane.PaneID, developerPaneLabel)
 		if err := a.markPaneRole(ctx, pane.PaneID, developerName, "developer"); err != nil {
 			_ = a.confirmClosePane(ctx, pane.PaneID)
@@ -111,16 +117,21 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		}
 		if err := a.herdr.ReportPaneRuntime(ctx, pane.PaneID, paneOwnershipSource, prepared.RuntimeID, buildRevision); err != nil {
 			_ = a.confirmClosePane(ctx, pane.PaneID)
-			return fmt.Errorf("mark cagy developer runtime: %w", err)
+			return fmt.Errorf("mark herdr-tandem developer runtime: %w", err)
 		}
 		prepared, err = a.runtimeManager().Update(prepared.RuntimeID, func(record *runtimeRecord) error { record.DeveloperPaneID = pane.PaneID; return nil })
 		if err != nil {
 			_ = a.confirmClosePane(ctx, pane.PaneID)
 			return err
 		}
-		developer, err = a.herdr.StartAgy(ctx, developerName, pane.PaneID)
+		startSpec, specErr := a.developerAdapter.StartSpec(developerName, pane.PaneID, "")
+		if specErr != nil {
+			err = specErr
+		} else {
+			developer, err = a.herdr.StartAgent(ctx, startSpec)
+		}
 		if err == nil {
-			err = a.ensureAgyReady(ctx, pane.PaneID)
+			err = a.ensureDeveloperReady(ctx, pane.PaneID)
 		}
 		if err != nil && developer.PaneID != "" {
 			keepRuntime = true
@@ -130,7 +141,7 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 			_ = a.confirmClosePane(ctx, pane.PaneID)
 			return fmt.Errorf("start agy developer: %w", err)
 		}
-		if err := validateDeveloperSession(developer, startInfo, current); err != nil {
+		if err := a.validateDeveloperSession(developer, startInfo, current); err != nil {
 			keepRuntime = true
 			return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
 		}
@@ -154,12 +165,12 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 	if err != nil {
 		return err
 	}
-	mcpOverride, err := codexMCPServerOverride(binPath, mcpEnv)
+	env := mergeEnv(a.environ(), map[string]string{"HERDR_TANDEM_PROJECT_DIR": project, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developer.PaneID, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, runtimeIDEnv: prepared.RuntimeID, supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()})
+	launch, err := a.supervisor.BuildLaunch(supervisor.LaunchContext{ProjectDir: project, Executable: binPath, MCPEnv: mcpEnv, BaseEnv: env, Instructions: supervisorInstructions(a.now())})
 	if err != nil {
-		return fmt.Errorf("configure codex mcp bridge: %w", err)
+		return fmt.Errorf("configure %s supervisor: %w", a.supervisor.DisplayName(), err)
 	}
-	env := mergeEnv(a.environ(), map[string]string{"CAGY_PROJECT_DIR": project, "CAGY_DEVELOPER": developerName, "CAGY_DEVELOPER_PANE_ID": developer.PaneID, "CAGY_SUPERVISOR_PANE_ID": current.PaneID, runtimeIDEnv: prepared.RuntimeID})
-	return a.runner.RunAttached(codexArgs(project, mcpOverride), env)
+	return a.runner.RunAttached(launch.Args, launch.Env)
 }
 
 func (a *App) buildMCPEnv(current herdr.PaneInfo, developerName, developerPaneID, project string) (map[string]string, error) {
@@ -171,15 +182,15 @@ func (a *App) buildMCPEnvForRuntime(current herdr.PaneInfo, developerName, devel
 	if socketPath == "" {
 		return nil, fmt.Errorf("herdr socket path is missing")
 	}
-	env := map[string]string{"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": current.WorkspaceID, "HERDR_PANE_ID": current.PaneID, "HERDR_SOCKET_PATH": socketPath, "CAGY_SUPERVISOR_PANE_ID": current.PaneID, "CAGY_DEVELOPER": developerName, "CAGY_DEVELOPER_PANE_ID": developerPaneID, "CAGY_PROJECT_DIR": project}
+	env := map[string]string{"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": current.WorkspaceID, "HERDR_PANE_ID": current.PaneID, "HERDR_SOCKET_PATH": socketPath, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developerPaneID, "HERDR_TANDEM_PROJECT_DIR": project, supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()}
 	if v := strings.TrimSpace(current.TabID); v != "" {
 		env["HERDR_TAB_ID"] = v
 	}
 	if runtimeID = strings.TrimSpace(runtimeID); runtimeID != "" {
 		env[runtimeIDEnv] = runtimeID
 	}
-	if routerURL := strings.TrimSpace(a.getenv("CAGY_ROUTER_URL")); routerURL != "" {
-		env["CAGY_ROUTER_URL"] = routerURL
+	if serviceURL := strings.TrimSpace(a.getenv("HERDR_TANDEM_PROVIDER_SERVICE_URL")); serviceURL != "" {
+		env["HERDR_TANDEM_PROVIDER_SERVICE_URL"] = serviceURL
 	}
 	return env, nil
 }
@@ -198,22 +209,23 @@ func (a *App) doctor(ctx context.Context) error {
 	}
 	check("supported platform", a.checkPlatform())
 	check("inside Herdr", a.requireHerdr())
-	for _, executable := range []string{"herdr", "codex", "agy"} {
+	for _, executable := range []string{"herdr", a.supervisor.Executable(), a.developerAdapter.Executable()} {
 		_, err := a.runner.LookPath(executable)
 		check(executable+" on PATH", err)
 	}
-	check("9Router health", a.checkRouter(ctx))
-	check("Codex YOLO flag", a.commandSucceeds(ctx, "codex", "--yolo", "--help"))
-	check("Codex MCP support", a.helpContains(ctx, []string{"codex", "mcp", "--help"}, "list"))
-	check("agy YOLO and exact resume flags", a.helpContains(ctx, []string{"agy", "--help"}, "--dangerously-skip-permissions", "accept-edits", "--conversation"))
+	if a.developerAdapter.RequiresProviderService() {
+		check("provider service health", a.checkProviderService(ctx))
+	}
+	check(a.supervisor.DisplayName()+" capabilities", a.supervisor.Validate(ctx, a.runner))
+	check(a.developerAdapter.DisplayName()+" YOLO and exact resume flags", a.helpContains(ctx, []string{a.developerAdapter.Executable(), "--help"}, "--dangerously-skip-permissions", "accept-edits", "--conversation"))
 	check("Herdr agent automation", a.helpContains(ctx, []string{"herdr", "agent"}, "agent start", "agent prompt", "agent wait", "agy"))
 	check("Herdr pane automation", a.helpContains(ctx, []string{"herdr", "pane"}, "pane split", "pane run", "pane close", "pane report-metadata"))
 	check("Herdr sidebar labels", a.helpContains(ctx, []string{"herdr", "pane", "report-metadata", "--help"}, "--source", "--agent", "--display-agent", "--token"))
 	check("Herdr Agent view API", a.helpContains(ctx, []string{"herdr", "api", "schema", "--json"}, "agent.view.set", "agent.view.clear"))
-	check("Herdr agy transcript integration", a.checkAgyIntegration(ctx))
+	check("Herdr "+a.developerAdapter.DisplayName()+" transcript integration", a.checkAgyIntegration(ctx))
 	check("current Herdr pane", a.checkCurrentPane(ctx))
-	if a.getenv("CAGY_SUPERVISOR_PANE_ID") != "" && a.getenv("CAGY_PROJECT_DIR") != "" {
-		check("cagy session", a.checkSessionHealth(ctx))
+	if a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID") != "" && a.getenv("HERDR_TANDEM_PROJECT_DIR") != "" {
+		check("herdr-tandem session", a.checkSessionHealth(ctx))
 		if taskErr := a.reportTaskJournal(ctx); taskErr != nil {
 			failed = true
 			if !errors.Is(taskErr, errTaskAttention) {
@@ -226,7 +238,7 @@ func (a *App) doctor(ctx context.Context) error {
 		return fmt.Errorf("doctor found problems")
 	}
 	a.debugf("doctor end ok=true")
-	fmt.Fprintln(a.stdout, "cagy is ready")
+	fmt.Fprintln(a.stdout, "herdr-tandem is ready")
 	return nil
 }
 
@@ -251,8 +263,10 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if err := a.ensureNoInterruptedTask(ctx, info); err != nil {
 		return nil, err
 	}
-	if err := a.checkRouter(ctx); err != nil {
-		return nil, err
+	if a.developerAdapter.RequiresProviderService() {
+		if err := a.checkProviderService(ctx); err != nil {
+			return nil, err
+		}
 	}
 	developer, err := a.ensureDeveloper(ctx, info)
 	if err != nil {
@@ -278,9 +292,9 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if taskErr != nil {
 		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
 		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run cagy doctor: %w", taskErr)
+			return nil, fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run herdr-tandem doctor: %w", taskErr)
 		}
-		return nil, fmt.Errorf("agy task failed; run cagy doctor before sending another task: %w", taskErr)
+		return nil, fmt.Errorf("agy task failed; run herdr-tandem doctor before sending another task: %w", taskErr)
 	}
 	a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 	if result.agent.AgentStatus == "blocked" {
@@ -289,7 +303,7 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	}
 	if strings.TrimSpace(result.output) == "" {
 		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
-		return nil, fmt.Errorf("agy finished without readable output; run cagy doctor")
+		return nil, fmt.Errorf("agy finished without readable output; run herdr-tandem doctor")
 	}
 	if err := a.setTrackedPhase(taskPhaseCompleted, result.agent); err != nil {
 		return nil, fmt.Errorf("save completed task state before delivering output: %w", err)
@@ -326,15 +340,15 @@ func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo, rec
 		receipt = a.activeTask.DeliveryReceipt
 	}
 	if _, err := fmt.Fprintln(a.stdout, output); err != nil {
-		return fmt.Errorf("write agy response; recover it with cagy ask --recover: %w", err)
+		return fmt.Errorf("write agy response; recover it with herdr-tandem ask --recover: %w", err)
 	}
 	if receipt != "" {
 		if err := a.acknowledgeTask(context.Background(), receipt); err != nil {
-			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run cagy doctor before new work: %w", err)
+			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run herdr-tandem doctor before new work: %w", err)
 		}
 	} else if a.activeTask != nil {
 		if err := a.removeTaskJournal(a.activeTask.Developer); err != nil {
-			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run cagy doctor before new work: %w", err)
+			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run herdr-tandem doctor before new work: %w", err)
 		}
 		a.activeTask = nil
 	}
@@ -350,10 +364,10 @@ func (a *App) stop(ctx context.Context) error {
 	manager := a.runtimeManager()
 	record, hasRecord, err := manager.FindForScope(info)
 	if err != nil {
-		return fmt.Errorf("read cagy runtime ownership: %w", err)
+		return fmt.Errorf("read herdr-tandem runtime ownership: %w", err)
 	}
 	if hasRecord && strings.TrimSpace(a.getenv(runtimeIDEnv)) != "" && a.getenv(runtimeIDEnv) != record.RuntimeID {
-		return errors.New("cagy runtime ID is stale; restart the supervisor before stopping")
+		return errors.New("herdr-tandem runtime ID is stale; restart the supervisor before stopping")
 	}
 	supervisor, err := a.supervisorPane(ctx, info)
 	if err != nil {
@@ -372,7 +386,7 @@ func (a *App) stop(ctx context.Context) error {
 				if err := validatePaneScope(pane, info, supervisor); err != nil {
 					return err
 				}
-				if pane.Tokens["cagy_owner"] != info.developer || pane.Tokens["cagy_role"] != "developer" {
+				if pane.Tokens["herdr_tandem_owner"] != info.developer || pane.Tokens["herdr_tandem_role"] != "developer" {
 					return errors.New("managed developer pane ownership is invalid")
 				}
 				if err := a.confirmClosePane(ctx, paneID); err != nil {
@@ -385,10 +399,10 @@ func (a *App) stop(ctx context.Context) error {
 		}
 		if hasRecord {
 			if err := manager.Remove(record.RuntimeID); err != nil {
-				return fmt.Errorf("clear cagy runtime ownership: %w", err)
+				return fmt.Errorf("clear herdr-tandem runtime ownership: %w", err)
 			}
 		}
-		fmt.Fprintln(a.stdout, "cagy developer is not running")
+		fmt.Fprintln(a.stdout, "herdr-tandem developer is not running")
 		return nil
 	}
 	if err != nil {
@@ -398,7 +412,7 @@ func (a *App) stop(ctx context.Context) error {
 		return err
 	}
 	if hasRecord && record.DeveloperPaneID != "" && record.DeveloperPaneID != developer.PaneID {
-		return errors.New("cagy runtime pane does not match the visible developer")
+		return errors.New("herdr-tandem runtime pane does not match the visible developer")
 	}
 	if err := a.interruptAndWaitAgent(ctx, info.developer); err != nil {
 		if errors.Is(err, errAgentReleaseTimeout) {
@@ -411,19 +425,21 @@ func (a *App) stop(ctx context.Context) error {
 	}
 	if hasRecord {
 		if err := manager.Remove(record.RuntimeID); err != nil {
-			return fmt.Errorf("clear cagy runtime ownership: %w", err)
+			return fmt.Errorf("clear herdr-tandem runtime ownership: %w", err)
 		}
 	}
-	fmt.Fprintln(a.stdout, "stopped the agy developer; exit Codex normally to finish")
+	fmt.Fprintf(a.stdout, "stopped the agy developer; exit %s normally to finish\n", a.supervisor.DisplayName())
 	return nil
 }
 
 type runtimeContext struct {
-	workspaceID   string
-	supervisor    string
-	developer     string
-	developerPane string
-	project       string
+	supervisorKind string
+	developerKind  string
+	workspaceID    string
+	supervisor     string
+	developer      string
+	developerPane  string
+	project        string
 }
 
 func (a *App) context() (runtimeContext, error) {
@@ -431,15 +447,15 @@ func (a *App) context() (runtimeContext, error) {
 		return runtimeContext{}, err
 	}
 	workspaceID := a.getenv("HERDR_WORKSPACE_ID")
-	supervisor := a.getenv("CAGY_SUPERVISOR_PANE_ID")
+	supervisor := a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID")
 	if supervisor == "" {
 		supervisor = a.getenv("HERDR_PANE_ID")
 	}
 	developer := developerName(workspaceID, supervisor)
-	if saved := a.getenv("CAGY_DEVELOPER"); saved != "" && saved != developer {
-		return runtimeContext{}, fmt.Errorf("cagy developer identity is stale; restart the supervisor")
+	if saved := a.getenv("HERDR_TANDEM_DEVELOPER"); saved != "" && saved != developer {
+		return runtimeContext{}, fmt.Errorf("herdr-tandem developer identity is stale; restart the supervisor")
 	}
-	developerPane, project := a.getenv("CAGY_DEVELOPER_PANE_ID"), a.getenv("CAGY_PROJECT_DIR")
+	developerPane, project := a.getenv("HERDR_TANDEM_DEVELOPER_PANE_ID"), a.getenv("HERDR_TANDEM_PROJECT_DIR")
 	if project == "" {
 		var err error
 		project, err = resolveProject(".")
@@ -447,16 +463,16 @@ func (a *App) context() (runtimeContext, error) {
 			return runtimeContext{}, err
 		}
 	}
-	return runtimeContext{workspaceID: workspaceID, supervisor: supervisor, developer: developer, developerPane: developerPane, project: filepath.Clean(project)}, nil
+	return runtimeContext{supervisorKind: a.supervisor.ID(), developerKind: a.developerAdapter.ID(), workspaceID: workspaceID, supervisor: supervisor, developer: developer, developerPane: developerPane, project: filepath.Clean(project)}, nil
 }
 
 func (a *App) requireHerdr() error {
 	if a.getenv("HERDR_ENV") != "1" {
-		return fmt.Errorf("run cagy from a shell pane inside Herdr")
+		return fmt.Errorf("run herdr-tandem from a shell pane inside Herdr")
 	}
 	paneID := a.getenv("HERDR_PANE_ID")
 	if paneID == "" {
-		paneID = a.getenv("CAGY_SUPERVISOR_PANE_ID")
+		paneID = a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID")
 	}
 	if a.getenv("HERDR_WORKSPACE_ID") == "" || paneID == "" {
 		return fmt.Errorf("herdr pane context is missing")
@@ -473,8 +489,10 @@ func (a *App) requireExecutables(names ...string) error {
 }
 
 func (a *App) checkSessionHealth(ctx context.Context) error {
-	if err := a.checkRouter(ctx); err != nil {
-		return err
+	if a.developerAdapter.RequiresProviderService() {
+		if err := a.checkProviderService(ctx); err != nil {
+			return err
+		}
 	}
 	info, err := a.context()
 	if err != nil {
@@ -490,12 +508,12 @@ func (a *App) checkSessionHealth(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if live, sessionErr := exactAgySessionID(developer); sessionErr == nil {
-			if strings.TrimSpace(pane.Tokens["cagy_session"]) != live || pane.Tokens[agySessionStateToken] != agySessionStateReady {
+		if live, sessionErr := a.exactDeveloperSessionID(developer); sessionErr == nil {
+			if strings.TrimSpace(pane.Tokens["herdr_tandem_session"]) != live || pane.Tokens[agySessionStateToken] != agySessionStateReady {
 				return fmt.Errorf("saved agy conversation does not match the live conversation")
 			}
 		} else {
-			pending := (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["cagy_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
+			pending := (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["herdr_tandem_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
 			if !pending {
 				return fmt.Errorf("exact agy conversation is not ready: %w", sessionErr)
 			}
@@ -510,9 +528,9 @@ func (a *App) checkSessionHealth(ctx context.Context) error {
 		return repairErr
 	}
 	if pane.PaneID != "" {
-		return fmt.Errorf("agy developer is missing; cagy ask can repair pane %s", pane.PaneID)
+		return fmt.Errorf("agy developer is missing; herdr-tandem ask can repair pane %s", pane.PaneID)
 	}
-	return fmt.Errorf("agy developer is missing; cagy ask can create a replacement")
+	return fmt.Errorf("agy developer is missing; herdr-tandem ask can create a replacement")
 }
 
 func (a *App) getDeveloperStatus(ctx context.Context) (*DeveloperStatusOutput, error) {
@@ -520,7 +538,7 @@ func (a *App) getDeveloperStatus(ctx context.Context) (*DeveloperStatusOutput, e
 	if err != nil {
 		return nil, err
 	}
-	routerReady := a.checkRouter(ctx) == nil
+	providerServiceReady := !a.developerAdapter.RequiresProviderService() || a.checkProviderService(ctx) == nil
 	supervisor, err := a.supervisorPane(ctx, info)
 	if err != nil {
 		return nil, err
@@ -528,7 +546,7 @@ func (a *App) getDeveloperStatus(ctx context.Context) (*DeveloperStatusOutput, e
 	developer, err := a.herdr.GetAgent(ctx, info.developer)
 	if err != nil {
 		if herdr.IsCode(err, "agent_not_found") {
-			return &DeveloperStatusOutput{Developer: info.developer, Status: "not_running", Project: info.project, RouterReady: routerReady, TaskSummary: "developer is not running"}, nil
+			return &DeveloperStatusOutput{Supervisor: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), Developer: info.developer, Status: "not_running", Project: info.project, ProviderServiceReady: providerServiceReady, TaskSummary: "developer is not running"}, nil
 		}
 		return nil, fmt.Errorf("find agy developer: %w", err)
 	}
@@ -537,24 +555,24 @@ func (a *App) getDeveloperStatus(ctx context.Context) (*DeveloperStatusOutput, e
 		return nil, err
 	}
 	sessionReady := false
-	if live, sessionErr := exactAgySessionID(developer); sessionErr == nil {
-		sessionReady = strings.TrimSpace(pane.Tokens["cagy_session"]) == live && pane.Tokens[agySessionStateToken] == agySessionStateReady
+	if live, sessionErr := a.exactDeveloperSessionID(developer); sessionErr == nil {
+		sessionReady = strings.TrimSpace(pane.Tokens["herdr_tandem_session"]) == live && pane.Tokens[agySessionStateToken] == agySessionStateReady
 	} else {
-		sessionReady = (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["cagy_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
+		sessionReady = (developer.AgentSession == nil || strings.TrimSpace(developer.AgentSession.Value) == "") && strings.TrimSpace(pane.Tokens["herdr_tandem_session"]) == "" && pane.Tokens[agySessionStateToken] == agySessionStatePending
 	}
 	taskSummary := "no active task"
 	record, exists, loadErr := a.loadTaskJournal(info.developer)
 	if loadErr != nil {
-		taskSummary = "interrupted task state is unreadable; run cagy doctor"
+		taskSummary = "interrupted task state is unreadable; run herdr-tandem doctor"
 	} else if exists {
 		inspection, inspectErr := a.inspectTaskJournal(ctx, info, record)
 		if inspectErr != nil {
-			taskSummary = "interrupted task state is invalid; run cagy doctor"
+			taskSummary = "interrupted task state is invalid; run herdr-tandem doctor"
 		} else {
 			taskSummary = fmt.Sprintf("task is %s: %s", inspection.kind, inspection.message)
 		}
 	}
-	return &DeveloperStatusOutput{Developer: info.developer, PaneID: developer.PaneID, Status: developer.AgentStatus, Project: info.project, SessionReady: sessionReady, RouterReady: routerReady, TaskSummary: taskSummary}, nil
+	return &DeveloperStatusOutput{Supervisor: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), Developer: info.developer, PaneID: developer.PaneID, Status: developer.AgentStatus, Project: info.project, SessionReady: sessionReady, ProviderServiceReady: providerServiceReady, TaskSummary: taskSummary}, nil
 }
 
 func (a *App) checkCurrentPane(ctx context.Context) error {
@@ -610,21 +628,21 @@ func (a *App) helpContains(ctx context.Context, args []string, expected ...strin
 }
 func developerName(workspaceID, paneID string) string {
 	sum := sha256.Sum256([]byte(workspaceID + "\x00" + paneID))
-	return fmt.Sprintf("cagy_dev_%x", sum[:5])
+	return fmt.Sprintf("herdr_tandem_dev_%x", sum[:5])
 }
-func validateDeveloper(agent herdr.AgentInfo, workspaceID, project string) error {
-	if agent.Agent != "agy" {
-		return fmt.Errorf("cagy developer target is not agy")
+func validateDeveloper(agent herdr.AgentInfo, workspaceID, project string, expected string) error {
+	if agent.Agent != expected {
+		return fmt.Errorf("herdr-tandem developer target is not %s", expected)
 	}
 	if agent.WorkspaceID != workspaceID {
-		return fmt.Errorf("cagy developer belongs to another Herdr workspace")
+		return fmt.Errorf("herdr-tandem developer belongs to another Herdr workspace")
 	}
 	agentProject, err := agentCWD(agent)
 	if err != nil {
 		return err
 	}
 	if agentProject != filepath.Clean(project) {
-		return fmt.Errorf("cagy developer belongs to another project: %s", agentProject)
+		return fmt.Errorf("herdr-tandem developer belongs to another project: %s", agentProject)
 	}
 	return nil
 }

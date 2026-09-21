@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,20 +10,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
-	"github.com/kazimshah39/cagy/internal/securestate"
-	"github.com/kazimshah39/cagy/internal/transcript"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/securestate"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 )
 
 var errTaskAttention = errors.New("interrupted task needs attention")
 
 const (
-	taskJournalVersion  = 3
+	taskJournalVersion  = 4
 	maxTaskJournalBytes = 64 << 10
 	maxTaskLockBytes    = 4 << 10
 	staleLockGrace      = 30 * time.Second
@@ -41,6 +43,8 @@ const (
 
 type taskJournal struct {
 	Version             int       `json:"version"`
+	SupervisorKind      string    `json:"supervisor_kind"`
+	DeveloperKind       string    `json:"developer_kind"`
 	WorkspaceID         string    `json:"workspace_id"`
 	SupervisorPaneID    string    `json:"supervisor_pane_id"`
 	Developer           string    `json:"developer"`
@@ -117,10 +121,16 @@ func (a *App) loadTaskJournal(developer string) (taskJournal, bool, error) {
 		a.debugf("task-journal load none developer=%q reason=%q", developer, "journal-missing")
 		return taskJournal{}, false, nil
 	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var record taskJournal
-	if err := json.Unmarshal(data, &record); err != nil {
+	if err := decoder.Decode(&record); err != nil {
 		a.debugf("task-journal load corrupt developer=%q bytes=%d", developer, len(data))
 		return taskJournal{}, true, fmt.Errorf("interrupted-task state is corrupt at %s", path)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return taskJournal{}, true, fmt.Errorf("interrupted-task state has trailing data at %s", path)
 	}
 	a.debugf("task-journal load success developer=%q phase=%q task=%q has_session=%t receipt_present=%t", developer, record.Phase, debugHashPrefix(record.TaskHash), record.SessionID != "", record.DeliveryReceipt != "")
 	return record, true, nil
@@ -173,6 +183,8 @@ func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, 
 	now := a.now().UTC()
 	record := taskJournal{
 		Version:             taskJournalVersion,
+		SupervisorKind:      info.supervisorKind,
+		DeveloperKind:       info.developerKind,
 		WorkspaceID:         info.workspaceID,
 		SupervisorPaneID:    info.supervisor,
 		Developer:           info.developer,
@@ -193,7 +205,7 @@ func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, 
 		}
 		record.DeliveryReceipt = receipt
 	}
-	if sessionID, err := exactAgySessionID(developer); err == nil {
+	if sessionID, err := a.exactDeveloperSessionID(developer); err == nil {
 		record.SessionID = sessionID
 	}
 	if err := a.writeTaskJournal(record); err != nil {
@@ -216,7 +228,7 @@ func (a *App) replaceTrackedPrompt(developer herdr.AgentInfo, task string, check
 	a.activeTask.CompactOffset = checkpoint.Offset
 	a.activeTask.FullOffset = checkpoint.FullOffset
 	a.activeTask.Phase = phase
-	if sessionID, err := exactAgySessionID(developer); err == nil {
+	if sessionID, err := a.exactDeveloperSessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
 	a.activeTask.UpdatedAt = a.now().UTC()
@@ -262,7 +274,7 @@ func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error 
 		a.activeTask.DeveloperPaneID = developer.PaneID
 	}
 	// Only update SessionID when the incoming developer has a valid session.
-	if sessionID, err := exactAgySessionID(developer); err == nil {
+	if sessionID, err := a.exactDeveloperSessionID(developer); err == nil {
 		a.activeTask.SessionID = sessionID
 	}
 	a.activeTask.UpdatedAt = a.now().UTC()
@@ -273,7 +285,7 @@ func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error 
 
 func (a *App) warnTrackedPhase(phase taskPhase, developer herdr.AgentInfo) {
 	if err := a.setTrackedPhase(phase, developer); err != nil {
-		fmt.Fprintf(a.stderr, "cagy warning: could not update interrupted-task state: %v\n", err)
+		fmt.Fprintf(a.stderr, "herdr-tandem warning: could not update interrupted-task state: %v\n", err)
 	}
 }
 
@@ -281,11 +293,14 @@ func validateTaskJournal(record taskJournal, info runtimeContext) error {
 	if record.Phase == "recovering" {
 		record.Phase = taskPhaseUncertain
 	}
-	if record.Version != 1 && record.Version != 2 && record.Version != 3 {
+	if record.Version != taskJournalVersion {
 		return fmt.Errorf("unsupported interrupted-task state version %d", record.Version)
 	}
+	if record.SupervisorKind != info.supervisorKind || record.DeveloperKind != info.developerKind {
+		return fmt.Errorf("interrupted-task state uses another workflow profile")
+	}
 	if record.WorkspaceID != info.workspaceID || record.SupervisorPaneID != info.supervisor || record.Developer != info.developer {
-		return fmt.Errorf("interrupted-task state belongs to another cagy session")
+		return fmt.Errorf("interrupted-task state belongs to another herdr-tandem session")
 	}
 	if filepath.Clean(record.Project) != filepath.Clean(info.project) {
 		return fmt.Errorf("interrupted-task state belongs to another project")
@@ -332,7 +347,7 @@ func (a *App) journalCheckpoint(record taskJournal, sessionID string) (transcrip
 	if record.CheckpointSessionID != sessionID {
 		return transcript.Checkpoint{}, fmt.Errorf("interrupted-task transcript checkpoint belongs to another conversation")
 	}
-	paths, err := transcript.PathsFor(a.agyBrainRoot, transcript.Ref{
+	paths, err := transcript.PathsFor(a.transcriptRoot, transcript.Ref{
 		Source: "herdr:antigravity_cli",
 		Agent:  "agy",
 		Kind:   "id",
@@ -419,7 +434,7 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 
 	sessionID := record.SessionID
 	if developerErr == nil {
-		if liveSessionID, sessionErr := exactAgySessionID(developer); sessionErr == nil {
+		if liveSessionID, sessionErr := a.exactDeveloperSessionID(developer); sessionErr == nil {
 			if sessionID != "" && sessionID != liveSessionID {
 				return taskInspection{}, fmt.Errorf("interrupted-task conversation no longer matches the live developer")
 			}
@@ -433,7 +448,7 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 		if err != nil {
 			return taskInspection{}, fmt.Errorf("restore interrupted-task transcript checkpoint: %w", err)
 		}
-		responseState, err = transcript.FinalResponseStateForHash(a.agyBrainRoot, transcript.Ref{
+		responseState, err = transcript.FinalResponseStateForHash(a.transcriptRoot, transcript.Ref{
 			Source: "herdr:antigravity_cli",
 			Agent:  "agy",
 			Kind:   "id",
@@ -525,18 +540,18 @@ func (a *App) ensureNoInterruptedTask(ctx context.Context, info runtimeContext) 
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
 	if err != nil {
 		a.debugf("task-guard invalid developer=%q task=%q error=%q", info.developer, debugHashPrefix(record.TaskHash), err)
-		return fmt.Errorf("interrupted-task state is invalid: %w; run cagy doctor", err)
+		return fmt.Errorf("interrupted-task state is invalid: %w; run herdr-tandem doctor", err)
 	}
 	a.debugf("task-guard blocked developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), inspection.kind)
 	switch inspection.kind {
 	case taskInspectionCompleted:
-		return fmt.Errorf("a previous task completed but its answer was not acknowledged; run: cagy ask --recover")
+		return fmt.Errorf("a previous task completed but its answer was not acknowledged; run: herdr-tandem ask --recover")
 	case taskInspectionRunning:
-		return fmt.Errorf("a previous task is still running; check the right pane or run cagy doctor")
+		return fmt.Errorf("a previous task is still running; check the right pane or run herdr-tandem doctor")
 	case taskInspectionBlocked:
 		return fmt.Errorf("a previous task is blocked; check the right pane")
 	default:
-		return fmt.Errorf("a previous task has uncertain state: %s; run cagy doctor", inspection.message)
+		return fmt.Errorf("a previous task has uncertain state: %s; run herdr-tandem doctor", inspection.message)
 	}
 }
 
@@ -575,18 +590,18 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 		return fmt.Errorf("save delivery receipt before output: %w", err)
 	}
 	if _, err := fmt.Fprintln(a.stdout, inspection.response); err != nil {
-		return fmt.Errorf("write recovered agy response; retry cagy ask --recover: %w", err)
+		return fmt.Errorf("write recovered agy response; retry herdr-tandem ask --recover: %w", err)
 	}
 	// Reload so acknowledgeLockedTask sees the persisted receipt on disk.
 	updatedRecord, exists, loadErr := a.loadTaskJournal(info.developer)
 	if loadErr != nil {
-		return fmt.Errorf("agy answer was recovered, but durable task state could not be reloaded: %w; run cagy doctor", loadErr)
+		return fmt.Errorf("agy answer was recovered, but durable task state could not be reloaded: %w; run herdr-tandem doctor", loadErr)
 	}
 	if !exists {
-		return fmt.Errorf("agy answer was recovered, but durable task state disappeared before acknowledgment; run cagy doctor")
+		return fmt.Errorf("agy answer was recovered, but durable task state disappeared before acknowledgment; run herdr-tandem doctor")
 	}
 	if err := a.acknowledgeLockedTask(updatedRecord, receipt, info); err != nil {
-		return fmt.Errorf("agy answer was recovered, but durable task state could not be cleared; run cagy doctor: %w", err)
+		return fmt.Errorf("agy answer was recovered, but durable task state could not be cleared; run herdr-tandem doctor: %w", err)
 	}
 	a.debugf("task-cli-recover success developer=%q task=%q response_bytes=%d", info.developer, debugHashPrefix(record.TaskHash), len(inspection.response))
 	return nil
@@ -650,10 +665,10 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 	record, exists, loadErr := a.loadTaskJournal(info.developer)
 	if loadErr != nil {
 		a.debugf("task-status journal-error developer=%q error=%q", info.developer, loadErr)
-		fmt.Fprintf(a.stderr, "cagy warning: task journal is unreadable: %v\n", loadErr)
+		fmt.Fprintf(a.stderr, "herdr-tandem warning: task journal is unreadable: %v\n", loadErr)
 		return &TaskStatusOutput{
 			Status:  "uncertain",
-			Message: "task journal is unreadable; run cagy doctor",
+			Message: "task journal is unreadable; run herdr-tandem doctor",
 		}, nil
 	}
 	if !exists {
@@ -678,10 +693,10 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 	inspection, err := a.inspectTaskJournal(ctx, info, record)
 	if err != nil {
 		a.debugf("task-status inspect-error developer=%q task=%q error=%q", info.developer, debugHashPrefix(record.TaskHash), err)
-		fmt.Fprintf(a.stderr, "cagy warning: task state is invalid: %v\n", err)
+		fmt.Fprintf(a.stderr, "herdr-tandem warning: task state is invalid: %v\n", err)
 		return &TaskStatusOutput{
 			Status:  "uncertain",
-			Message: "task state is invalid; run cagy doctor",
+			Message: "task state is invalid; run herdr-tandem doctor",
 		}, nil
 	}
 
@@ -870,7 +885,7 @@ func (a *App) reportTaskJournal(ctx context.Context) error {
 	case taskInspectionRunning:
 		fmt.Fprintf(a.stdout, "! interrupted task state: still running (%s elapsed); check the right pane\n", age)
 	case taskInspectionCompleted:
-		fmt.Fprintln(a.stdout, "! interrupted task state: completed but answer was not acknowledged; run: cagy ask --recover")
+		fmt.Fprintln(a.stdout, "! interrupted task state: completed but answer was not acknowledged; run: herdr-tandem ask --recover")
 	case taskInspectionBlocked:
 		fmt.Fprintln(a.stdout, "! interrupted task state: blocked; check the right pane")
 	default:
@@ -896,7 +911,7 @@ func acquireLock(stateDir, developer string, now time.Time) (*taskLock, error) {
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "operation is busy") {
-			return nil, fmt.Errorf("developer is busy; another cagy ask process owns %s", filepath.Join(stateDir, stateFileName("lock", developer, ".json")))
+			return nil, fmt.Errorf("developer is busy; another herdr-tandem ask process owns %s", filepath.Join(stateDir, stateFileName("lock", developer, ".json")))
 		}
 		return nil, err
 	}

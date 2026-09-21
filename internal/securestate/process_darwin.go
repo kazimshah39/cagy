@@ -19,7 +19,7 @@ func processStartIdentity(pid int) (string, error) {
 }
 
 // processAlive uses Darwin's kill(2) directly. os.FindProcess alone does not
-// prove that a PID still exists on macOS, so stale cagy locks could otherwise
+// prove that a PID still exists on macOS, so stale herdr-tandem locks could otherwise
 // look live forever after a crashed or killed process.
 func processAlive(pid int) bool {
 	err := unix.Kill(pid, 0)

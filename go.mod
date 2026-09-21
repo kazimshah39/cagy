@@ -1,4 +1,4 @@
-module github.com/kazimshah39/cagy
+module github.com/kazimshah39/herdr-tandem
 
 go 1.25.0
 

@@ -2,23 +2,13 @@ package app
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
-	"github.com/kazimshah39/cagy/internal/transcript"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 )
 
-func defaultAgyBrainRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".gemini", "antigravity-cli", "brain")
-}
-
 func (a *App) transcriptCheckpoint(agent herdr.AgentInfo) (transcript.Checkpoint, error) {
-	return transcript.Capture(a.agyBrainRoot, transcriptRef(agent.AgentSession))
+	return transcript.Capture(a.transcriptRoot, transcriptRef(agent.AgentSession))
 }
 
 func transcriptRef(session *herdr.AgentSessionInfo) *transcript.Ref {
@@ -43,5 +33,5 @@ func (a *App) completedTranscriptState(checkpoint transcript.Checkpoint, agent h
 	if ref == nil {
 		return transcript.ResponseState{}, fmt.Errorf("agy transcript was not reported; run: herdr integration install antigravity-cli")
 	}
-	return transcript.FinalResponseStateForHash(a.agyBrainRoot, *ref, checkpoint, transcript.TaskHash(task))
+	return transcript.FinalResponseStateForHash(a.transcriptRoot, *ref, checkpoint, transcript.TaskHash(task))
 }

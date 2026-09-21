@@ -1,20 +1,20 @@
 .DEFAULT_GOAL := help
 
-BIN := cagy
-MODULE := github.com/kazimshah39/cagy
+BIN := herdr-tandem
+MODULE := github.com/kazimshah39/herdr-tandem
 
 .PHONY: help
 help: ## Display this help message
-	@echo "cagy development targets:"
+	@echo "herdr-tandem development targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build cagy binary
-	go build -trimpath -ldflags "-s -w" -o $(BIN) ./cmd/cagy
+build: ## Build herdr-tandem binary
+	go build -trimpath -ldflags "-s -w" -o $(BIN) ./cmd/herdr-tandem
 
 .PHONY: install
-install: ## Install cagy binary to GOBIN or GOPATH/bin
-	go install -trimpath -ldflags "-s -w" ./cmd/cagy
+install: ## Install herdr-tandem binary to GOBIN or GOPATH/bin
+	go install -trimpath -ldflags "-s -w" ./cmd/herdr-tandem
 
 .PHONY: test
 test: ## Run unit tests
@@ -68,12 +68,12 @@ release-build: ## Build the Apple Silicon macOS release archive and checksum (e.
 	 echo "Building $${os}/$${arch}..."; \
 	 build_dir="dist/build_$${os}_$${arch}"; \
 	 mkdir -p "$$build_dir"; \
-	 CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o "$$build_dir/cagy" ./cmd/cagy; \
+	 CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o "$$build_dir/herdr-tandem" ./cmd/herdr-tandem; \
 	 cp LICENSE "$$build_dir/"; \
 	 cp README.md "$$build_dir/"; \
-	 tar -czf "dist/cagy_$(VERSION)_$${os}_$${arch}.tar.gz" -C "$$build_dir" cagy LICENSE README.md; \
+	 tar -czf "dist/herdr-tandem_$(VERSION)_$${os}_$${arch}.tar.gz" -C "$$build_dir" herdr-tandem LICENSE README.md; \
 	 rm -rf "$$build_dir"
-	@cd dist && (command -v sha256sum >/dev/null 2>&1 && sha256sum cagy_*.tar.gz > checksums.txt || shasum -a 256 cagy_*.tar.gz > checksums.txt)
+	@cd dist && (command -v sha256sum >/dev/null 2>&1 && sha256sum herdr-tandem_*.tar.gz > checksums.txt || shasum -a 256 herdr-tandem_*.tar.gz > checksums.txt)
 	@echo "Release assets generated in dist/ for version $(VERSION)"
 
 .PHONY: clean

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
-	"github.com/kazimshah39/cagy/internal/transcript"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 	"strings"
 	"time"
 )

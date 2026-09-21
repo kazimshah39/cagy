@@ -1,69 +1,71 @@
-# cagy
+# Herdr Tandem
 
-`cagy` runs one visible Codex supervisor and one visible `agy` developer inside Herdr.
-
-It is designed for several projects running at the same time. Provider accounts and quota fallback are handled by **9Router**, not by cagy.
+Herdr Tandem runs one visible supervisor and one visible `agy` developer inside Herdr.
+The supported supervisors are **Codex** and **OpenCode**. The developer remains `agy`.
 
 ```text
-Project A cagy ── agy A ─┐
-Project B cagy ── agy B ─┼─ 9Router MITM ─ provider account pool
-Project C cagy ── agy C ─┘
+Project A: Herdr Tandem (Codex/OpenCode) + agy
+Project B: Herdr Tandem (Codex/OpenCode) + agy
+Project C: Herdr Tandem (Codex/OpenCode) + agy
 ```
+
+Each project has an independent Herdr Tandem runtime. Provider access and account fallback stay outside this application.
 
 ## Requirements
 
 - Apple Silicon macOS
-- Herdr, Codex, and agy on `PATH`
+- Herdr, `codex`, `opencode`, and `agy` on `PATH`
 - Herdr's current Antigravity transcript integration
-- 9Router running locally with Antigravity MITM enabled, its certificate trusted, and Antigravity DNS interception enabled
+- A local provider service with account fallback configured
 
-By default cagy checks 9Router's public health endpoint at `http://127.0.0.1:20128/api/health`. Use `CAGY_ROUTER_URL` only if you intentionally run 9Router at another loopback URL. This check confirms that 9Router is reachable; configure MITM, certificates, DNS, and account fallback in 9Router itself.
+Herdr Tandem checks the provider service health endpoint at `http://127.0.0.1:20128/api/health`.
+Set `HERDR_TANDEM_PROVIDER_SERVICE_URL` only when the service uses another loopback URL. Herdr Tandem does not configure the service or manage provider credentials, accounts, or quota fallback.
 
 ## Commands
 
 ```bash
-cagy [DIRECTORY]
-cagy --show-agents [DIRECTORY]
-cagy doctor
-cagy stop
+herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
+herdr-tandem --show-agents [--supervisor codex|opencode] [DIRECTORY]
+herdr-tandem doctor [--supervisor codex|opencode]
+herdr-tandem stop
 ```
 
-Compatibility commands:
+Emergency task commands remain available through the same binary:
 
 ```bash
-cagy ask --stdin
-cagy ask --recover
-cagy ask --forget
+herdr-tandem ask --stdin
+herdr-tandem ask --recover
+herdr-tandem ask --forget
 ```
 
-`cagy accounts` was intentionally removed. cagy does not store credentials, edit Keychain entries, run OAuth, check `/quota`, or rotate accounts.
+The default supervisor is Codex. OpenCode is selected explicitly with `--supervisor opencode`.
 
 ## How it works
 
-1. `cagy` checks Herdr, agy integration, and 9Router health.
-2. It starts a visible right-hand agy developer pane.
-3. It starts Codex in the current pane with a local stdio MCP bridge.
-4. Codex delegates work through `delegate_task`.
-5. cagy tracks the exact transcript response and durable task state.
-6. 9Router selects a healthy provider account and retries eligible provider failures.
+1. Herdr Tandem validates Herdr, the selected supervisor, `agy`, and the provider service.
+2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state`.
+3. It starts a visible right-hand `agy` pane.
+4. It starts Codex or OpenCode in the current pane with a local stdio MCP bridge.
+5. The supervisor delegates through `delegate_task` and reviews the exact transcript result.
+6. Herdr Tandem journals task hashes and transcript offsets and requires acknowledgement receipts.
+7. The provider service owns account selection, quota handling, and fallback.
 
-Each supervisor has its own runtime record. Different Herdr panes and projects can run simultaneously. A duplicate start from the same supervisor pane is rejected.
-
-## Important limits
-
-cagy verifies only that 9Router is reachable, but it does not install, configure, inspect, or repair MITM. Set up 9Router first. Cagy also cannot make a provider quota reset sooner; it relies on 9Router's configured account and model fallback policy.
+Each supervisor pane has its own runtime, so multiple projects can run at the same time.
+A duplicate start from the same Herdr pane is rejected.
 
 ## Safety
 
-- cagy does not change 9Router settings, certificates, DNS, `/etc/hosts`, Keychain items, or provider accounts.
-- cagy never writes task text, answers, credentials, or complete transcripts to its diagnostics.
-- The final answer comes only from the exact matching agy transcript event.
+- No tmux, daemon, listener, hidden worker, queue, or web UI is used.
+- Process arguments are passed as arrays; prompts and paths are never shell-interpolated.
+- State files are private (`0700` directories and `0600` files).
+- Diagnostics never contain prompts, answers, credentials, service secrets, or complete transcripts.
+- Automated tests never launch real agents or consume model quota.
 
 ## Development checks
 
 ```bash
-go test ./...
+make verify
+go build ./cmd/herdr-tandem
 go test -race ./...
 go vet ./...
-go build ./cmd/cagy
 ```

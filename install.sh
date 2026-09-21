@@ -1,19 +1,19 @@
 #!/bin/sh
-# cagy installer - secure one-command installer for Apple Silicon macOS
-# https://github.com/kazimshah39/cagy
+# herdr-tandem installer - secure one-command installer for Apple Silicon macOS
+# https://github.com/kazimshah39/herdr-tandem
 
 set -eu
 (set -o pipefail 2>/dev/null) && set -o pipefail
 
-GITHUB_REPO="${CAGY_REPO:-kazimshah39/cagy}"
-INSTALL_DIR="${CAGY_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
-VERSION="${CAGY_VERSION:-${VERSION:-}}"
-MODE="${CAGY_MODE:-auto}"
-BASE_URL="${CAGY_DOWNLOAD_BASE_URL:-}"
+GITHUB_REPO="${HERDR_TANDEM_REPO:-kazimshah39/herdr-tandem}"
+INSTALL_DIR="${HERDR_TANDEM_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
+VERSION="${HERDR_TANDEM_VERSION:-${VERSION:-}}"
+MODE="${HERDR_TANDEM_MODE:-auto}"
+BASE_URL="${HERDR_TANDEM_DOWNLOAD_BASE_URL:-}"
 
 print_usage() {
   cat <<EOF
-cagy installer
+herdr-tandem installer
 
 Usage:
   install.sh [options]
@@ -26,11 +26,11 @@ Options:
   -h, --help                      Show this help message
 
 Environment variables:
-  CAGY_INSTALL_DIR, INSTALL_DIR   Install directory override
-  CAGY_VERSION, VERSION           Version or ref override
-  CAGY_MODE                       Install mode: auto, source, or binary
-  CAGY_DOWNLOAD_BASE_URL          Custom download base URL (for mirrors/testing)
-  CAGY_REPO                       GitHub repository (default: kazimshah39/cagy)
+  HERDR_TANDEM_INSTALL_DIR, INSTALL_DIR   Install directory override
+  HERDR_TANDEM_VERSION, VERSION           Version or ref override
+  HERDR_TANDEM_MODE                       Install mode: auto, source, or binary
+  HERDR_TANDEM_DOWNLOAD_BASE_URL          Custom download base URL (for mirrors/testing)
+  HERDR_TANDEM_REPO                       GitHub repository (default: kazimshah39/herdr-tandem)
 EOF
 }
 
@@ -73,18 +73,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# cagy intentionally supports only Apple Silicon macOS. Fail before any
+# herdr-tandem intentionally supports only Apple Silicon macOS. Fail before any
 # filesystem mutation when invoked elsewhere.
 OS_RAW="$(uname -s)"
 ARCH_RAW="$(uname -m)"
 if [ "$OS_RAW" != "Darwin" ]; then
-  echo "Error: cagy supports only macOS on Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
+  echo "Error: herdr-tandem supports only macOS on Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
   exit 1
 fi
 case "$ARCH_RAW" in
   arm64|aarch64) ;;
   *)
-    echo "Error: cagy supports only Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
+    echo "Error: herdr-tandem supports only Apple Silicon (darwin/arm64); detected ${OS_RAW}/${ARCH_RAW}." >&2
     exit 1
     ;;
 esac
@@ -186,8 +186,8 @@ detect_local_repo() {
     return 1
   fi
   script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || return 1
-  if [ -f "${script_dir}/go.mod" ] && [ -f "${script_dir}/cmd/cagy/main.go" ]; then
-    if grep -q "module github.com/kazimshah39/cagy" "${script_dir}/go.mod" 2>/dev/null; then
+  if [ -f "${script_dir}/go.mod" ] && [ -f "${script_dir}/cmd/herdr-tandem/main.go" ]; then
+    if grep -q "module github.com/kazimshah39/herdr-tandem" "${script_dir}/go.mod" 2>/dev/null; then
       echo "$script_dir"
       return 0
     fi
@@ -198,18 +198,18 @@ detect_local_repo() {
 # Ensure install directory exists and is user-writable
 if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
   echo "Error: Cannot create directory ${INSTALL_DIR}." >&2
-  echo "Please check permissions or choose another directory using --dir or CAGY_INSTALL_DIR." >&2
+  echo "Please check permissions or choose another directory using --dir or HERDR_TANDEM_INSTALL_DIR." >&2
   exit 1
 fi
 
 if [ ! -w "$INSTALL_DIR" ]; then
   echo "Error: Install directory ${INSTALL_DIR} is not writable by current user." >&2
-  echo "cagy does not require root/sudo. Please specify a user-writable directory (e.g. ~/.local/bin)." >&2
+  echo "herdr-tandem does not require root/sudo. Please specify a user-writable directory (e.g. ~/.local/bin)." >&2
   exit 1
 fi
 
 # Set up temporary working directory
-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'cagy-install')"
+TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'herdr-tandem-install')"
 TARGET_TMP=""
 
 cleanup() {
@@ -229,12 +229,12 @@ install_from_source() {
 
   if [ "$go_status" -eq 1 ]; then
     echo "Error: Go toolchain not found on PATH." >&2
-    echo "cagy source installation requires Go 1.25 or newer." >&2
+    echo "herdr-tandem source installation requires Go 1.25 or newer." >&2
     echo "Install Go from https://go.dev/dl/ or use prebuilt release binaries if published." >&2
     exit 1
   elif [ "$go_status" -eq 2 ]; then
     echo "Error: Go version is older than 1.25 ($(go version))." >&2
-    echo "cagy requires Go 1.25 or newer to compile." >&2
+    echo "herdr-tandem requires Go 1.25 or newer to compile." >&2
     exit 1
   fi
 
@@ -242,11 +242,11 @@ install_from_source() {
 
   # Only use local checkout if directly executed as a local file, not piped, and no specific version was requested
   if [ -n "$LOCAL_CLONE" ] && [ -z "$BASE_URL" ] && [ -z "$VERSION" ]; then
-    echo "Building cagy from local source tree at ${LOCAL_CLONE}..."
+    echo "Building herdr-tandem from local source tree at ${LOCAL_CLONE}..."
     SRC_DIR="$LOCAL_CLONE"
   else
     REF="${VERSION:-main}"
-    echo "Fetching cagy source (${REF}) from github.com/${GITHUB_REPO}..."
+    echo "Fetching herdr-tandem source (${REF}) from github.com/${GITHUB_REPO}..."
 
     if [ -n "$BASE_URL" ]; then
       SRC_URL="${BASE_URL}/archive.tar.gz"
@@ -269,17 +269,17 @@ install_from_source() {
     tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR"
     SRC_DIR="$(find "$TMP_DIR" -name "go.mod" -exec dirname {} \; | head -n 1)"
 
-    if [ -z "$SRC_DIR" ] || [ ! -f "$SRC_DIR/cmd/cagy/main.go" ]; then
-      echo "Error: Source archive did not contain expected cagy Go package." >&2
+    if [ -z "$SRC_DIR" ] || [ ! -f "$SRC_DIR/cmd/herdr-tandem/main.go" ]; then
+      echo "Error: Source archive did not contain expected herdr-tandem Go package." >&2
       exit 1
     fi
   fi
 
-  echo "Compiling cagy binary..."
-  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "$SRC_DIR" -trimpath -ldflags "-s -w" -o "$TMP_DIR/cagy" ./cmd/cagy
+  echo "Compiling herdr-tandem binary..."
+  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "$SRC_DIR" -trimpath -ldflags "-s -w" -o "$TMP_DIR/herdr-tandem" ./cmd/herdr-tandem
 
-  if [ ! -f "$TMP_DIR/cagy" ]; then
-    echo "Error: Compilation failed to generate cagy binary." >&2
+  if [ ! -f "$TMP_DIR/herdr-tandem" ]; then
+    echo "Error: Compilation failed to generate herdr-tandem binary." >&2
     exit 1
   fi
 }
@@ -294,7 +294,7 @@ install_from_binary() {
   fi
 
   if [ -z "$VERSION" ]; then
-    echo "Resolving latest cagy release..."
+    echo "Resolving latest herdr-tandem release..."
     TAG=""
     if [ "$DOWNLOADER" = "curl" ]; then
       EFFECTIVE_URL="$(curl -fsSIL -o /dev/null -w "%{url_effective}" "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null || true)"
@@ -323,7 +323,7 @@ install_from_binary() {
   fi
 
   VERSION_NUM="${TAG#v}"
-  ARCHIVE_NAME="cagy_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
+  ARCHIVE_NAME="herdr-tandem_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
   CHECKSUMS_NAME="checksums.txt"
 
   if [ -n "$BASE_URL" ]; then
@@ -334,7 +334,7 @@ install_from_binary() {
     CHECKSUMS_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}/${CHECKSUMS_NAME}"
   fi
 
-  echo "Downloading cagy ${TAG} for ${OS}/${ARCH}..."
+  echo "Downloading herdr-tandem ${TAG} for ${OS}/${ARCH}..."
   if ! http_get "$CHECKSUMS_URL" "$TMP_DIR/$CHECKSUMS_NAME"; then
     echo "Error: Failed to download ${CHECKSUMS_NAME} from ${CHECKSUMS_URL}." >&2
     echo "If no release binary is published yet, install from source: install.sh --source" >&2
@@ -383,8 +383,8 @@ install_from_binary() {
   echo "✓ Checksum verified"
   tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR"
 
-  if [ ! -f "$TMP_DIR/cagy" ]; then
-    echo "Error: Release archive did not contain 'cagy' binary." >&2
+  if [ ! -f "$TMP_DIR/herdr-tandem" ]; then
+    echo "Error: Release archive did not contain 'herdr-tandem' binary." >&2
     exit 1
   fi
 }
@@ -397,14 +397,14 @@ else
 fi
 
 # Collision-safe atomic install inside the destination directory
-chmod 755 "$TMP_DIR/cagy"
-TARGET_TMP="$(mktemp "${INSTALL_DIR}/.cagy.install.XXXXXX" 2>/dev/null || mktemp "${INSTALL_DIR}/cagy.tmp.XXXXXX")"
-cp "$TMP_DIR/cagy" "$TARGET_TMP"
+chmod 755 "$TMP_DIR/herdr-tandem"
+TARGET_TMP="$(mktemp "${INSTALL_DIR}/.herdr-tandem.install.XXXXXX" 2>/dev/null || mktemp "${INSTALL_DIR}/herdr-tandem.tmp.XXXXXX")"
+cp "$TMP_DIR/herdr-tandem" "$TARGET_TMP"
 chmod 755 "$TARGET_TMP"
-mv -f "$TARGET_TMP" "$INSTALL_DIR/cagy"
+mv -f "$TARGET_TMP" "$INSTALL_DIR/herdr-tandem"
 TARGET_TMP=""
 
-echo "✓ Successfully installed cagy to ${INSTALL_DIR}/cagy"
+echo "✓ Successfully installed herdr-tandem to ${INSTALL_DIR}/herdr-tandem"
 
 # PATH verification & guidance
 case ":$PATH:" in
@@ -413,7 +413,7 @@ case ":$PATH:" in
   *)
     echo ""
     echo "Note: ${INSTALL_DIR} is not currently in your PATH."
-    echo "To run cagy directly, add it to your shell profile:"
+    echo "To run herdr-tandem directly, add it to your shell profile:"
     echo ""
     echo "  # For zsh (~/.zshrc):"
     echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""

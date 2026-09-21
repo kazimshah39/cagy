@@ -11,18 +11,18 @@ import (
 	"strings"
 )
 
-// DefaultDir returns cagy's private state directory for the current user.
+// DefaultDir returns herdr-tandem's private state directory for the current user.
 func DefaultDir() string {
 	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" && filepath.IsAbs(stateHome) {
-		return filepath.Join(stateHome, "cagy")
+		return filepath.Join(stateHome, "herdr-tandem")
 	}
 	configDir, err := os.UserConfigDir()
 	if err == nil && strings.TrimSpace(configDir) != "" {
-		return filepath.Join(configDir, "cagy", "state")
+		return filepath.Join(configDir, "herdr-tandem", "state")
 	}
 	home, err := os.UserHomeDir()
 	if err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".cagy", "state")
+		return filepath.Join(home, ".herdr-tandem", "state")
 	}
 	return ""
 }
@@ -30,20 +30,20 @@ func DefaultDir() string {
 // InspectDir validates an existing private state directory.
 func InspectDir(path string) (bool, error) {
 	if strings.TrimSpace(path) == "" {
-		return false, fmt.Errorf("cagy state directory is unavailable")
+		return false, fmt.Errorf("herdr-tandem state directory is unavailable")
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("inspect cagy state directory: %w", err)
+		return false, fmt.Errorf("inspect herdr-tandem state directory: %w", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return true, fmt.Errorf("cagy state path is not a private directory")
+		return true, fmt.Errorf("herdr-tandem state path is not a private directory")
 	}
 	if info.Mode().Perm() != 0o700 {
-		return true, fmt.Errorf("cagy state directory permissions are %04o, want 0700", info.Mode().Perm())
+		return true, fmt.Errorf("herdr-tandem state directory permissions are %04o, want 0700", info.Mode().Perm())
 	}
 	return true, nil
 }
@@ -51,21 +51,21 @@ func InspectDir(path string) (bool, error) {
 // EnsureDir creates and validates a private state directory.
 func EnsureDir(path string) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("cagy state directory is unavailable")
+		return fmt.Errorf("herdr-tandem state directory is unavailable")
 	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create cagy state directory: %w", err)
+		return fmt.Errorf("create herdr-tandem state directory: %w", err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("inspect cagy state directory: %w", err)
+		return fmt.Errorf("inspect herdr-tandem state directory: %w", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("cagy state path is not a private directory")
+		return fmt.Errorf("herdr-tandem state path is not a private directory")
 	}
 	if info.Mode().Perm() != 0o700 {
 		if err := os.Chmod(path, 0o700); err != nil {
-			return fmt.Errorf("secure cagy state directory: %w", err)
+			return fmt.Errorf("secure herdr-tandem state directory: %w", err)
 		}
 	}
 	return nil
@@ -131,7 +131,7 @@ func WriteFile(stateDir, name string, data []byte) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	temporary, err := os.CreateTemp(stateDir, ".cagy-state-*.tmp")
+	temporary, err := os.CreateTemp(stateDir, ".herdr-tandem-state-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -182,11 +182,11 @@ func RemoveFile(stateDir, name string) error {
 func SyncDir(path string) error {
 	directory, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open cagy state directory for sync: %w", err)
+		return fmt.Errorf("open herdr-tandem state directory for sync: %w", err)
 	}
 	defer directory.Close()
 	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync cagy state directory: %w", err)
+		return fmt.Errorf("sync herdr-tandem state directory: %w", err)
 	}
 	return nil
 }

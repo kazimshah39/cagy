@@ -58,8 +58,8 @@ func TestLockIncompleteYoungFailsClosedAndOldIsReclaimed(t *testing.T) {
 }
 
 func TestLockProcessContention(t *testing.T) {
-	if os.Getenv("CAGY_LOCK_HELPER") == "1" {
-		dir := os.Getenv("CAGY_LOCK_DIR")
+	if os.Getenv("HERDR_TANDEM_LOCK_HELPER") == "1" {
+		dir := os.Getenv("HERDR_TANDEM_LOCK_DIR")
 		lock, err := Acquire(dir, LockOptions{Name: "accounts.lock", Subject: "accounts", OperationID: "helper", Now: time.Now()})
 		if err != nil {
 			os.Exit(2)
@@ -72,7 +72,7 @@ func TestLockProcessContention(t *testing.T) {
 
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLockProcessContention$")
-	cmd.Env = append(os.Environ(), "CAGY_LOCK_HELPER=1", "CAGY_LOCK_DIR="+dir)
+	cmd.Env = append(os.Environ(), "HERDR_TANDEM_LOCK_HELPER=1", "HERDR_TANDEM_LOCK_DIR="+dir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

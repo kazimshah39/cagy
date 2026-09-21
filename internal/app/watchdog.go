@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
-	"github.com/kazimshah39/cagy/internal/transcript"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 )
 
 const (
@@ -40,7 +40,7 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task string, checkpo
 	taskCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
-	fmt.Fprintln(a.stderr, "cagy: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
+	fmt.Fprintln(a.stderr, "herdr-tandem: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
 	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, durationMS(initialWait))
 	a.debugf("watchdog prompt-result task=%q status=%q pane=%q error=%q", taskID, settled.AgentStatus, settled.PaneID, waitErr)
 	if waitErr != nil && !herdr.IsCode(waitErr, "timeout") && !herdr.IsCode(waitErr, "agent_prompt_stalled") {
@@ -109,7 +109,7 @@ func (a *App) monitorDeveloperTask(
 	a.debugf("watchdog monitor-begin task=%q target=%q remaining=%s poll=%s stall=%s", taskID, target, remaining, poll, stallWindow)
 	progressCheckpoint := checkpoint
 	if progressCheckpoint.Path == "" && current.AgentSession != nil {
-		if paths, err := transcript.PathsFor(a.agyBrainRoot, transcript.Ref{Source: current.AgentSession.Source, Agent: current.AgentSession.Agent, Kind: current.AgentSession.Kind, Value: current.AgentSession.Value}); err == nil {
+		if paths, err := transcript.PathsFor(a.transcriptRoot, transcript.Ref{Source: current.AgentSession.Source, Agent: current.AgentSession.Agent, Kind: current.AgentSession.Kind, Value: current.AgentSession.Value}); err == nil {
 			progressCheckpoint.Path = paths.Compact
 			progressCheckpoint.FullPath = paths.Full
 		}
@@ -220,7 +220,7 @@ func (a *App) reportTaskProgress(agent herdr.AgentInfo, elapsed time.Duration) {
 		elapsed = 0
 	}
 	a.warnTrackedPhase(taskPhaseMonitoring, agent)
-	fmt.Fprintf(a.stderr, "cagy: task is still running after %s; progress remains visible in the right pane\n", elapsed.Round(time.Second))
+	fmt.Fprintf(a.stderr, "herdr-tandem: task is still running after %s; progress remains visible in the right pane\n", elapsed.Round(time.Second))
 }
 
 func (a *App) transcriptAgent(ctx context.Context, target string, agent herdr.AgentInfo) (herdr.AgentInfo, error) {

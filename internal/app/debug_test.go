@@ -35,13 +35,13 @@ func TestDebugTaskFingerprintDoesNotContainTask(t *testing.T) {
 
 func TestDiagnosticsCanBeDisabled(t *testing.T) {
 	getenv := func(key string) string {
-		if key == "CAGY_DIAGNOSTICS" {
+		if key == "HERDR_TANDEM_DIAGNOSTICS" {
 			return "0"
 		}
 		return ""
 	}
 	if diagnosticsEnabled(getenv, false) {
-		t.Fatal("diagnostics should be disabled by CAGY_DIAGNOSTICS=0")
+		t.Fatal("diagnostics should be disabled by HERDR_TANDEM_DIAGNOSTICS=0")
 	}
 	if diagnosticsEnabled(func(string) string { return "" }, true) {
 		t.Fatal("diagnostics should be disabled in test processes")

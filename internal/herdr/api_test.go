@@ -11,11 +11,11 @@ import (
 	"testing"
 )
 
-func TestCagySidebarViewUsesHerdrJSONSocketAPI(t *testing.T) {
+func TestTandemSidebarViewUsesHerdrJSONSocketAPI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Herdr uses a named-pipe transport on Windows")
 	}
-	dir, err := os.MkdirTemp("/tmp", "cagy-api-")
+	dir, err := os.MkdirTemp("/tmp", "herdr-tandem-api-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,13 +48,13 @@ func TestCagySidebarViewUsesHerdrJSONSocketAPI(t *testing.T) {
 			return
 		}
 		requests <- request
-		_, err = connection.Write([]byte(`{"id":"cagy:sidebar","result":{"type":"agent_view","active":true,"source":"cagy:sidebar","label":"cagy"}}` + "\n"))
+		_, err = connection.Write([]byte(`{"id":"herdr-tandem:sidebar","result":{"type":"agent_view","active":true,"source":"herdr-tandem:sidebar","label":"herdr-tandem"}}` + "\n"))
 		if err != nil {
 			errors <- err
 		}
 	}()
 
-	if err := New(&fakeRunner{}).SetCagySidebarCompact(context.Background()); err != nil {
+	if err := New(&fakeRunner{}).SetTandemSidebarCompact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -65,7 +65,7 @@ func TestCagySidebarViewUsesHerdrJSONSocketAPI(t *testing.T) {
 			t.Fatalf("request=%#v", request)
 		}
 		params, ok := request["params"].(map[string]any)
-		if !ok || params["source"] != "cagy:sidebar" {
+		if !ok || params["source"] != "herdr-tandem:sidebar" {
 			t.Fatalf("params=%#v", request["params"])
 		}
 	}

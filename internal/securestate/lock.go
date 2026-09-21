@@ -76,7 +76,7 @@ func Acquire(stateDir string, options LockOptions) (*Lock, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create lock owner token: %w", err)
 		}
-		// #nosec G304 -- the validated basename is joined below cagy's private state directory.
+		// #nosec G304 -- the validated basename is joined below herdr-tandem's private state directory.
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			start, _ := processStartIdentity(os.Getpid())
@@ -120,7 +120,7 @@ func Acquire(stateDir string, options LockOptions) (*Lock, error) {
 			return nil, staleErr
 		}
 		if !stale {
-			return nil, fmt.Errorf("operation is busy; another cagy process owns %s", path)
+			return nil, fmt.Errorf("operation is busy; another herdr-tandem process owns %s", path)
 		}
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return nil, fmt.Errorf("remove stale lock: %w", removeErr)

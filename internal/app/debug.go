@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	diagnosticLogFileName = "cagy.log"
+	diagnosticLogFileName = "herdr-tandem.log"
 	diagnosticLogMaxBytes = 8 << 20
 	diagnosticLogBackups  = 5
 )
@@ -28,7 +28,7 @@ var (
 	oauthCodePattern = regexp.MustCompile(`\b4/[0-9A-Za-z._-]{12,}`)
 )
 
-// debugf writes always-on, bounded diagnostics for real cagy executions. Go
+// debugf writes always-on, bounded diagnostics for real herdr-tandem executions. Go
 // test binaries are excluded so automated tests never pollute the user's state.
 // Callers must still pass metadata only—never credential or task contents.
 func (a *App) debugf(format string, args ...any) {
@@ -54,7 +54,7 @@ func diagnosticsEnabled(getenv func(string) string, testProcess bool) bool {
 	if testProcess {
 		return false
 	}
-	return getenv == nil || getenv("CAGY_DIAGNOSTICS") != "0"
+	return getenv == nil || getenv("HERDR_TANDEM_DIAGNOSTICS") != "0"
 }
 
 func diagnosticCaller(skip int) string {

@@ -11,20 +11,20 @@ import (
 	"time"
 )
 
-const cagySidebarViewSource = "cagy:sidebar"
+const tandemSidebarViewSource = "herdr-tandem:sidebar"
 
-// SetCagySidebarCompact hides panes marked as cagy developers from Herdr's
+// SetTandemSidebarCompact hides panes marked as herdr-tandem developers from Herdr's
 // Agent view. Other agents remain visible. Herdr supports one transient Agent
 // view per server, so this intentionally becomes the active projection.
-func (c *Client) SetCagySidebarCompact(ctx context.Context) error {
+func (c *Client) SetTandemSidebarCompact(ctx context.Context) error {
 	params := map[string]any{
-		"source": cagySidebarViewSource,
-		"label":  "cagy",
+		"source": tandemSidebarViewSource,
+		"label":  "herdr-tandem",
 		"filter": map[string]any{
 			"op": "not",
 			"filter": map[string]any{
 				"op":    "eq",
-				"field": map[string]string{"token": "cagy_role"},
+				"field": map[string]string{"token": "herdr_tandem_role"},
 				"value": "developer",
 			},
 		},
@@ -32,11 +32,11 @@ func (c *Client) SetCagySidebarCompact(ctx context.Context) error {
 	return c.callAPI(ctx, "agent.view.set", params)
 }
 
-// ClearCagySidebarView removes the compact projection only when cagy still
+// ClearTandemSidebarView removes the compact projection only when herdr-tandem still
 // owns it. A view installed by another Herdr tool is left unchanged.
-func (c *Client) ClearCagySidebarView(ctx context.Context) error {
+func (c *Client) ClearTandemSidebarView(ctx context.Context) error {
 	return c.callAPI(ctx, "agent.view.clear", map[string]any{
-		"source": cagySidebarViewSource,
+		"source": tandemSidebarViewSource,
 	})
 }
 
@@ -65,7 +65,7 @@ func (c *Client) callAPI(ctx context.Context, method string, params any) error {
 	}
 
 	request := map[string]any{
-		"id":     "cagy:sidebar",
+		"id":     "herdr-tandem:sidebar",
 		"method": method,
 		"params": params,
 	}

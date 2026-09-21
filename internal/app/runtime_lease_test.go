@@ -5,12 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kazimshah39/cagy/internal/securestate"
+	"github.com/kazimshah39/herdr-tandem/internal/securestate"
 )
 
 func runtimeTestRecord(t *testing.T, id, supervisor string) runtimeRecord {
 	t.Helper()
-	return runtimeRecord{RuntimeID: id, WorkspaceID: "w1", SupervisorPaneID: supervisor, Developer: developerName("w1", supervisor), Project: filepath.Clean(t.TempDir())}
+	return runtimeRecord{RuntimeID: id, SupervisorKind: "codex", DeveloperKind: "agy", WorkspaceID: "w1", SupervisorPaneID: supervisor, Developer: developerName("w1", supervisor), Project: filepath.Clean(t.TempDir())}
 }
 
 func TestRuntimeRecordsAllowIndependentSupervisors(t *testing.T) {
@@ -28,7 +28,7 @@ func TestRuntimeRecordsAllowIndependentSupervisors(t *testing.T) {
 	if first.RuntimeID == second.RuntimeID {
 		t.Fatal("distinct supervisors shared a runtime ID")
 	}
-	info := runtimeContext{workspaceID: "w1", supervisor: "w1:p2", developer: developerName("w1", "w1:p2"), project: second.Project}
+	info := runtimeContext{supervisorKind: "codex", developerKind: "agy", workspaceID: "w1", supervisor: "w1:p2", developer: developerName("w1", "w1:p2"), project: second.Project}
 	found, exists, err := manager.FindForScope(info)
 	if err != nil || !exists || found.RuntimeID != "two" {
 		t.Fatalf("found=%+v exists=%t err=%v", found, exists, err)
@@ -98,5 +98,26 @@ func TestRuntimeRecordsRejectMalformedRecordRatherThanIgnoringIt(t *testing.T) {
 	}
 	if _, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "next", "w1:p2")); err == nil {
 		t.Fatal("malformed runtime record was ignored")
+	}
+}
+
+func TestRuntimeScopeIncludesWorkflowProfile(t *testing.T) {
+	manager := runtimeRecordManager{stateDir: t.TempDir(), liveness: func(context.Context, runtimeRecord) (runtimeLiveness, error) { return runtimeLiveness{}, nil }}
+	record := runtimeTestRecord(t, "one", "w1:p1")
+	prepared, err := manager.Prepare(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := runtimeContext{supervisorKind: "opencode", developerKind: "agy", workspaceID: "w1", supervisor: "w1:p1", developer: prepared.Developer, project: prepared.Project}
+	if _, exists, err := manager.FindForScope(info); err != nil || exists {
+		t.Fatalf("exists=%t err=%v", exists, err)
+	}
+}
+
+func TestRuntimeRecordRejectsUnknownProfile(t *testing.T) {
+	record := runtimeTestRecord(t, "one", "w1:p1")
+	record.SupervisorKind = "unknown"
+	if err := validateRuntimeRecord(record); err == nil {
+		t.Fatal("unknown supervisor profile accepted")
 	}
 }

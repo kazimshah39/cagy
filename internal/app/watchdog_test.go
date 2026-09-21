@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kazimshah39/cagy/internal/transcript"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 )
 
 func TestAgyVisibleStateReadsOnlyTheFooter(t *testing.T) {
@@ -74,7 +74,7 @@ func TestProgressSnapshotUsesOnlyBoundedMetadata(t *testing.T) {
 	}
 }
 
-func TestNewUsesRouterIndependentWatchdogDefaults(t *testing.T) {
+func TestNewUsesProviderIndependentWatchdogDefaults(t *testing.T) {
 	app := New(&fakeRunner{}, nil, nil)
 	if app.initialPromptWait != 30*time.Second || app.healthyStallWindow != 150*time.Second || app.heartbeatInterval != 5*time.Minute || app.taskDeadline != 30*time.Minute || app.developerPoll != time.Second {
 		t.Fatalf("unexpected defaults")

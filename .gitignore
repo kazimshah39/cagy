@@ -2,7 +2,7 @@
 .help/
 
 # Build outputs and binaries
-/cagy
+/herdr-tandem
 bin/
 build/
 dist/

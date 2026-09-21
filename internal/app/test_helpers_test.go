@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	proc "github.com/kazimshah39/cagy/internal/process"
+	proc "github.com/kazimshah39/herdr-tandem/internal/process"
 )
 
 type fakeRunner struct{}

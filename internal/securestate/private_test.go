@@ -88,3 +88,14 @@ func TestRemoveFileIsIdempotent(t *testing.T) {
 		t.Fatalf("file still exists: %v", err)
 	}
 }
+
+func TestDefaultDirUsesOnlyHerdrTandemName(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := DefaultDir()
+	if filepath.Base(path) != "herdr-tandem" {
+		t.Fatalf("path=%q", path)
+	}
+	if strings.Contains(strings.ToLower(path), "ca"+"gy") {
+		t.Fatalf("old state name leaked into %q", path)
+	}
+}

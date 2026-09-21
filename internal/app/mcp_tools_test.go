@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestMCPExposesOnlyRouterModeWorkflowTools(t *testing.T) {
+func TestMCPExposesOnlyProviderManagedModeWorkflowTools(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -21,7 +21,7 @@ func TestMCPExposesOnlyRouterModeWorkflowTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer serverSession.Close()
-	client := mcp.NewClient(&mcp.Implementation{Name: "cagy-test", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "herdr-tandem-test", Version: "1.0.0"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	proc "github.com/kazimshah39/cagy/internal/process"
+	proc "github.com/kazimshah39/herdr-tandem/internal/process"
 )
 
 // APIError is a structured error returned by Herdr.
@@ -33,7 +33,7 @@ type AgentSessionInfo struct {
 	Value  string `json:"value"`
 }
 
-// PaneInfo contains only the Herdr pane fields cagy needs.
+// PaneInfo contains only the Herdr pane fields herdr-tandem needs.
 type PaneInfo struct {
 	PaneID        string            `json:"pane_id"`
 	WorkspaceID   string            `json:"workspace_id"`
@@ -47,7 +47,7 @@ type PaneInfo struct {
 	AgentSession  *AgentSessionInfo `json:"agent_session"`
 }
 
-// AgentInfo contains only the Herdr agent fields cagy needs.
+// AgentInfo contains only the Herdr agent fields herdr-tandem needs.
 type PaneProcess struct {
 	Name string   `json:"name"`
 	Argv []string `json:"argv"`
@@ -170,27 +170,27 @@ func (c *Client) ReportAgentDisplay(ctx context.Context, paneID, source, agent, 
 	)
 }
 
-// ReportPaneOwnership records stable cagy ownership independently of the agent
-// process. These tokens remain available while agy is stopped, which lets cagy
+// ReportPaneOwnership records stable herdr-tandem ownership independently of the agent
+// process. These tokens remain available while agy is stopped, which lets herdr-tandem
 // repair a missing managed agent without claiming unrelated panes.
 func (c *Client) ReportPaneOwnership(ctx context.Context, paneID, source, owner, role string) error {
 	return c.json(ctx, nil,
 		"pane", "report-metadata", paneID,
 		"--source", source,
-		"--token", "cagy_owner="+owner,
-		"--token", "cagy_role="+role,
+		"--token", "herdr_tandem_owner="+owner,
+		"--token", "herdr_tandem_role="+role,
 	)
 }
 
-// ReportPaneRuntime records the runtime that owns a cagy supervisor/developer pane.
+// ReportPaneRuntime records the runtime that owns a herdr-tandem supervisor/developer pane.
 func (c *Client) ReportPaneRuntime(ctx context.Context, paneID, source, runtimeID, buildRevision string) error {
 	if strings.TrimSpace(runtimeID) == "" {
-		return fmt.Errorf("cagy runtime ID is required")
+		return fmt.Errorf("herdr-tandem runtime ID is required")
 	}
 	if strings.TrimSpace(buildRevision) == "" {
 		buildRevision = "unknown"
 	}
-	return c.json(ctx, nil, "pane", "report-metadata", paneID, "--source", source, "--token", "cagy_runtime_id="+runtimeID, "--token", "cagy_build_revision="+buildRevision)
+	return c.json(ctx, nil, "pane", "report-metadata", paneID, "--source", source, "--token", "herdr_tandem_runtime_id="+runtimeID, "--token", "herdr_tandem_build_revision="+buildRevision)
 }
 
 // ReportPaneSession persists the exact agy conversation identity independently
@@ -201,18 +201,18 @@ func (c *Client) ReportPaneSession(ctx context.Context, paneID, source, sessionI
 	return c.json(ctx, nil,
 		"pane", "report-metadata", paneID,
 		"--source", source,
-		"--token", "cagy_session="+sessionID,
-		"--token", "cagy_session_state=ready",
+		"--token", "herdr_tandem_session="+sessionID,
+		"--token", "herdr_tandem_session_state=ready",
 	)
 }
 
-// ReportPaneSessionPending marks a cagy-started fresh agy process whose first
+// ReportPaneSessionPending marks a herdr-tandem-started fresh agy process whose first
 // prompt has not run yet, so Herdr cannot have reported a conversation ID.
 func (c *Client) ReportPaneSessionPending(ctx context.Context, paneID, source string) error {
 	return c.json(ctx, nil,
 		"pane", "report-metadata", paneID,
 		"--source", source,
-		"--token", "cagy_session_state=pending",
+		"--token", "herdr_tandem_session_state=pending",
 	)
 }
 
@@ -220,86 +220,60 @@ func (c *Client) ClosePane(ctx context.Context, paneID string) error {
 	return c.json(ctx, nil, "pane", "close", paneID)
 }
 
-func (c *Client) StartAgy(ctx context.Context, name, paneID string) (AgentInfo, error) {
-	args := []string{"agent", "start", name, "--kind", "agy", "--pane", paneID, "--timeout", "60000", "--"}
-	return c.startAgyWithArgs(ctx, args)
+type AgentStartSpec struct {
+	Name            string
+	Kind            string
+	PaneID          string
+	TimeoutMS       int
+	Args            []string
+	ExpectedSession *AgentSessionInfo
 }
 
-// StartAgyWithSession resumes one exact agy conversation. Fresh sessions must
-// use StartAgy so a missing identity can never silently become a new session.
-func (c *Client) StartAgyWithSession(ctx context.Context, name, paneID, sessionID string) (AgentInfo, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return AgentInfo{}, fmt.Errorf("agy conversation ID is required")
+func (c *Client) StartAgent(ctx context.Context, spec AgentStartSpec) (AgentInfo, error) {
+	if strings.TrimSpace(spec.Name) == "" || strings.TrimSpace(spec.Kind) == "" || strings.TrimSpace(spec.PaneID) == "" {
+		return AgentInfo{}, fmt.Errorf("agent start name, kind, and pane are required")
 	}
-	args := []string{"agent", "start", name, "--kind", "agy", "--pane", paneID, "--timeout", "60000", "--", "--conversation", sessionID}
-	return c.startAgyWithArgs(ctx, args)
-}
-
-func (c *Client) startAgyWithArgs(ctx context.Context, args []string) (AgentInfo, error) {
-	args = append(args, "--dangerously-skip-permissions", "--mode", "accept-edits")
+	if spec.TimeoutMS <= 0 {
+		spec.TimeoutMS = 60000
+	}
+	args := []string{"agent", "start", spec.Name, "--kind", spec.Kind, "--pane", spec.PaneID, "--timeout", fmt.Sprint(spec.TimeoutMS), "--"}
+	args = append(args, spec.Args...)
 	var result agentResult
-	paneID := argumentAfter(args, "--pane")
-	expectedSession := argumentAfter(args, "--conversation")
-	c.diagnosticf("herdr agent-start begin pane=%q resume=%t", paneID, argumentAfter(args, "--conversation") != "")
+	c.diagnosticf("herdr agent-start begin pane=%q kind=%q resume=%t", spec.PaneID, spec.Kind, spec.ExpectedSession != nil)
 	err := c.json(ctx, &result, args...)
 	if err == nil {
 		c.diagnosticf("herdr agent-start success pane=%q status=%q", result.Agent.PaneID, result.Agent.AgentStatus)
-		return c.bindRequestedAgySession(paneID, expectedSession, result.Agent)
+		return bindExpectedSession(spec.ExpectedSession, result.Agent)
 	}
-	c.diagnosticf("herdr agent-start error pane=%q error=%q", paneID, err)
+	c.diagnosticf("herdr agent-start error pane=%q error=%q", spec.PaneID, err)
 	if !IsCode(err, "agent_pane_busy") {
 		return AgentInfo{}, err
 	}
-	if paneID == "" {
-		return AgentInfo{}, err
-	}
-	// A newly split Herdr pane can be returned just before its interactive
-	// shell owns the foreground. Wait for the actual shell state and retry the
-	// same start exactly once; agent_pane_busy guarantees the first call did not
-	// start an agent.
-	c.diagnosticf("herdr agent-start pane-busy pane=%q waiting_for_shell=true", paneID)
-	if waitErr := c.waitForAvailableShell(ctx, paneID, 15*time.Second); waitErr != nil {
-		c.diagnosticf("herdr agent-start shell-wait failed pane=%q error=%q", paneID, waitErr)
+	if waitErr := c.waitForAvailableShell(ctx, spec.PaneID, 15*time.Second); waitErr != nil {
 		if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
 			return AgentInfo{}, waitErr
 		}
 		return AgentInfo{}, fmt.Errorf("%w; wait for target shell: %v", err, waitErr)
 	}
-	c.diagnosticf("herdr agent-start shell-ready pane=%q retry=true", paneID)
 	result = agentResult{}
 	if retryErr := c.json(ctx, &result, args...); retryErr != nil {
-		c.diagnosticf("herdr agent-start retry-error pane=%q error=%q", paneID, retryErr)
 		return AgentInfo{}, retryErr
 	}
-	c.diagnosticf("herdr agent-start retry-success pane=%q status=%q", result.Agent.PaneID, result.Agent.AgentStatus)
-	return c.bindRequestedAgySession(paneID, expectedSession, result.Agent)
+	return bindExpectedSession(spec.ExpectedSession, result.Agent)
 }
 
-// bindRequestedAgySession closes a Herdr reporting gap for exact resume.
-// Herdr can successfully start an idle resumed agy process before its
-// antigravity-cli integration repeats the conversation identity. The requested
-// value is not guessed: it is the exact previously reported ID that cagy passed
-// to --conversation. Preserve it until the next prompt makes Herdr report it
-// again, while still rejecting any conflicting identity returned by Herdr.
-func (c *Client) bindRequestedAgySession(paneID, expected string, started AgentInfo) (AgentInfo, error) {
-	expected = strings.TrimSpace(expected)
-	if expected == "" {
+func bindExpectedSession(expected *AgentSessionInfo, started AgentInfo) (AgentInfo, error) {
+	if expected == nil || strings.TrimSpace(expected.Value) == "" {
 		return started, nil
 	}
 	if actual := agentSessionValue(started); actual != "" {
-		if actual != expected {
-			return AgentInfo{}, fmt.Errorf("agy resumed a different conversation: expected %s, got %s", expected, actual)
+		if actual != expected.Value {
+			return AgentInfo{}, fmt.Errorf("agy resumed a different conversation: expected %s, got %s", expected.Value, actual)
 		}
 		return started, nil
 	}
-	started.AgentSession = &AgentSessionInfo{
-		Source: "herdr:antigravity_cli",
-		Agent:  "agy",
-		Kind:   "id",
-		Value:  expected,
-	}
-	c.diagnosticf("herdr agent-session preserved pane=%q source=%q", paneID, "exact-resume-argument")
+	copy := *expected
+	started.AgentSession = &copy
 	return started, nil
 }
 
@@ -308,15 +282,6 @@ func agentSessionValue(agent AgentInfo) string {
 		return ""
 	}
 	return strings.TrimSpace(agent.AgentSession.Value)
-}
-
-func argumentAfter(args []string, name string) string {
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] == name {
-			return args[index+1]
-		}
-	}
-	return ""
 }
 
 func availableShellProcess(name string) bool {

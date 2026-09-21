@@ -12,6 +12,6 @@ If private vulnerability reporting is unavailable, open a minimal public issue a
 
 ## Sensitive data
 
-cagy must never log or expose provider OAuth tokens, refresh tokens, 9Router API keys or CLI tokens, Keychain contents, complete environment dumps, task text, final answers, or full private agent transcripts. cagy does not read, store, import, refresh, or rotate provider credentials; 9Router owns provider authentication and account fallback.
+Herdr Tandem must never log or expose provider OAuth tokens, refresh tokens, service credentials, Keychain contents, complete environment dumps, task text, final answers, or full private agent transcripts. Herdr Tandem does not read, store, import, refresh, or rotate provider credentials; the external provider service owns authentication and account fallback.
 
-Cagy keeps only private runtime records and interrupted-task journals in its state directory. They contain pane/session identifiers, task hashes, transcript offsets, timestamps, and delivery receipts—never provider credentials, 9Router secrets, task plaintext, or transcript content.
+Herdr Tandem keeps only private runtime records and interrupted-task journals in its state directory. They contain pane and session identifiers, task hashes, transcript offsets, timestamps, and delivery receipts—never provider credentials, service secrets, task plaintext, or transcript content.

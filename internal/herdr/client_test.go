@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	proc "github.com/kazimshah39/cagy/internal/process"
+	proc "github.com/kazimshah39/herdr-tandem/internal/process"
 )
 
 type fakeRunner struct {
@@ -28,6 +28,15 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (proc.Result, error)
 	return result, nil
 }
 func (f *fakeRunner) RunAttached(_ []string, _ []string) error { return nil }
+
+func testAgyStartSpec(name, paneID, sessionID string) AgentStartSpec {
+	spec := AgentStartSpec{Name: name, Kind: "agy", PaneID: paneID, TimeoutMS: 60000, Args: []string{"--dangerously-skip-permissions", "--mode", "accept-edits"}}
+	if sessionID != "" {
+		spec.Args = append([]string{"--conversation", sessionID}, spec.Args...)
+		spec.ExpectedSession = &AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: sessionID}
+	}
+	return spec
+}
 
 func TestSplitRightParsesPaneAndUsesSafeArguments(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{
@@ -54,10 +63,10 @@ func TestReportAgentDisplayUsesGuardedPresentationMetadata(t *testing.T) {
 		Stdout:   `{"id":"x","result":{"type":"ok"}}`,
 	}}}
 	client := New(runner)
-	if err := client.ReportAgentDisplay(context.Background(), "w1:p2", "cagy:developer-display", "agy", "cagy Developer"); err != nil {
+	if err := client.ReportAgentDisplay(context.Background(), "w1:p2", "herdr-tandem:developer-display", "agy", "herdr-tandem Developer"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:developer-display", "--agent", "agy", "--display-agent", "cagy Developer"}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:developer-display", "--agent", "agy", "--display-agent", "herdr-tandem Developer"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("args = %#v", runner.calls[0])
 	}
@@ -65,22 +74,22 @@ func TestReportAgentDisplayUsesGuardedPresentationMetadata(t *testing.T) {
 
 func TestGetAndListPanesParseOwnershipMetadata(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{
-		{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_info","pane":{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":"/tmp/project","label":"agy Repair","tokens":{"cagy_owner":"cagy_dev_abc","cagy_role":"repair"}}}}`},
-		{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_list","panes":[{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":"/tmp/project","label":"agy Repair","tokens":{"cagy_owner":"cagy_dev_abc","cagy_role":"repair"}}]}}`},
+		{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_info","pane":{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":"/tmp/project","label":"agy Repair","tokens":{"herdr_tandem_owner":"herdr_tandem_dev_abc","herdr_tandem_role":"repair"}}}}`},
+		{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_list","panes":[{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":"/tmp/project","label":"agy Repair","tokens":{"herdr_tandem_owner":"herdr_tandem_dev_abc","herdr_tandem_role":"repair"}}]}}`},
 	}}
 	client := New(runner)
 	pane, err := client.GetPane(context.Background(), "w1:p2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pane.Label != "agy Repair" || pane.Tokens["cagy_owner"] != "cagy_dev_abc" {
+	if pane.Label != "agy Repair" || pane.Tokens["herdr_tandem_owner"] != "herdr_tandem_dev_abc" {
 		t.Fatalf("pane=%+v", pane)
 	}
 	panes, err := client.ListPanes(context.Background(), "w1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(panes) != 1 || panes[0].Tokens["cagy_role"] != "repair" {
+	if len(panes) != 1 || panes[0].Tokens["herdr_tandem_role"] != "repair" {
 		t.Fatalf("panes=%+v", panes)
 	}
 	wants := [][]string{
@@ -113,16 +122,16 @@ func TestPaneProcessInfoParsesForegroundProcesses(t *testing.T) {
 func TestReportPaneOwnershipUsesPersistentUnguardedTokens(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"ok"}}`}}}
 	client := New(runner)
-	if err := client.ReportPaneOwnership(context.Background(), "w1:p2", "cagy:pane-owner", "cagy_dev_abc", "repair"); err != nil {
+	if err := client.ReportPaneOwnership(context.Background(), "w1:p2", "herdr-tandem:pane-owner", "herdr_tandem_dev_abc", "repair"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:pane-owner", "--token", "cagy_owner=cagy_dev_abc", "--token", "cagy_role=repair"}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:pane-owner", "--token", "herdr_tandem_owner=herdr_tandem_dev_abc", "--token", "herdr_tandem_role=repair"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("args=%#v", runner.calls[0])
 	}
 }
 
-func TestSetCagySidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
+func TestSetTandemSidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
 	runner := &fakeRunner{}
 	client := New(runner)
 	var method string
@@ -132,7 +141,7 @@ func TestSetCagySidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
 		params = gotParams
 		return nil
 	}
-	if err := client.SetCagySidebarCompact(context.Background()); err != nil {
+	if err := client.SetTandemSidebarCompact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if method != "agent.view.set" {
@@ -142,13 +151,13 @@ func TestSetCagySidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"filter":{"filter":{"field":{"token":"cagy_role"},"op":"eq","value":"developer"},"op":"not"},"label":"cagy","source":"cagy:sidebar"}`
+	want := `{"filter":{"filter":{"field":{"token":"herdr_tandem_role"},"op":"eq","value":"developer"},"op":"not"},"label":"herdr-tandem","source":"herdr-tandem:sidebar"}`
 	if string(encoded) != want {
 		t.Fatalf("params=%s", encoded)
 	}
 }
 
-func TestClearCagySidebarViewClearsOnlyOwnedProjection(t *testing.T) {
+func TestClearTandemSidebarViewClearsOnlyOwnedProjection(t *testing.T) {
 	client := New(&fakeRunner{})
 	var method string
 	var params any
@@ -157,7 +166,7 @@ func TestClearCagySidebarViewClearsOnlyOwnedProjection(t *testing.T) {
 		params = gotParams
 		return nil
 	}
-	if err := client.ClearCagySidebarView(context.Background()); err != nil {
+	if err := client.ClearTandemSidebarView(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if method != "agent.view.clear" {
@@ -167,19 +176,19 @@ func TestClearCagySidebarViewClearsOnlyOwnedProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"source":"cagy:sidebar"}` {
+	if string(encoded) != `{"source":"herdr-tandem:sidebar"}` {
 		t.Fatalf("params=%s", encoded)
 	}
 }
 
-func TestStartAgyAlwaysUsesYoloFlags(t *testing.T) {
+func TestStartAgentAgyAlwaysUsesYoloFlags(t *testing.T) {
 	for range 1 {
 		runner := &fakeRunner{results: []proc.Result{{
 			ExitCode: 0,
 			Stdout:   `{"id":"x","result":{"type":"agent_started","agent":{"agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1"},"argv":[]}}`,
 		}}}
 		client := New(runner)
-		if _, err := client.StartAgy(context.Background(), "cagy_dev_abc", "w1:p2"); err != nil {
+		if _, err := client.StartAgent(context.Background(), testAgyStartSpec("herdr_tandem_dev_abc", "w1:p2", "")); err != nil {
 			t.Fatal(err)
 		}
 		args := runner.calls[0]
@@ -193,22 +202,12 @@ func TestStartAgyAlwaysUsesYoloFlags(t *testing.T) {
 	}
 }
 
-func TestStartAgyWithSessionRejectsMissingConversation(t *testing.T) {
-	runner := &fakeRunner{}
-	if _, err := New(runner).StartAgyWithSession(context.Background(), "developer", "w1:p2", "  "); err == nil {
-		t.Fatal("expected missing conversation ID error")
-	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("agy was started without an exact conversation: %#v", runner.calls)
-	}
-}
-
-func TestStartAgyWithSessionUsesExactConversation(t *testing.T) {
+func TestStartAgentAgyWithSessionUsesExactConversation(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{
 		ExitCode: 0,
 		Stdout:   `{"id":"x","result":{"type":"agent_started","agent":{"agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1","agent_session":{"source":"herdr:antigravity_cli","agent":"agy","kind":"id","value":"session-123"}}}}`,
 	}}}
-	if _, err := New(runner).StartAgyWithSession(context.Background(), "developer", "w1:p2", "session-123"); err != nil {
+	if _, err := New(runner).StartAgent(context.Background(), testAgyStartSpec("developer", "w1:p2", "session-123")); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"herdr", "agent", "start", "developer", "--kind", "agy", "--pane", "w1:p2", "--timeout", "60000", "--", "--conversation", "session-123", "--dangerously-skip-permissions", "--mode", "accept-edits"}
@@ -217,11 +216,11 @@ func TestStartAgyWithSessionUsesExactConversation(t *testing.T) {
 	}
 }
 
-func TestStartAgyWithSessionPreservesExactRequestedConversationWhenHerdrOmitsIt(t *testing.T) {
+func TestStartAgentAgyWithSessionPreservesExactRequestedConversationWhenHerdrOmitsIt(t *testing.T) {
 	started := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"agent_started","agent":{"agent":"agy","name":"developer","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1"}}}`}
 	runner := &fakeRunner{results: []proc.Result{started}}
 
-	agent, err := New(runner).StartAgyWithSession(context.Background(), "developer", "w1:p2", "session-123")
+	agent, err := New(runner).StartAgent(context.Background(), testAgyStartSpec("developer", "w1:p2", "session-123"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,11 +232,11 @@ func TestStartAgyWithSessionPreservesExactRequestedConversationWhenHerdrOmitsIt(
 	}
 }
 
-func TestStartAgyWithSessionRejectsDifferentReportedConversation(t *testing.T) {
+func TestStartAgentAgyWithSessionRejectsDifferentReportedConversation(t *testing.T) {
 	started := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"agent_started","agent":{"agent":"agy","name":"developer","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1","agent_session":{"source":"herdr:antigravity_cli","agent":"agy","kind":"id","value":"other-session"}}}}`}
 	runner := &fakeRunner{results: []proc.Result{started}}
 
-	_, err := New(runner).StartAgyWithSession(context.Background(), "developer", "w1:p2", "session-123")
+	_, err := New(runner).StartAgent(context.Background(), testAgyStartSpec("developer", "w1:p2", "session-123"))
 	if err == nil || !strings.Contains(err.Error(), "different conversation") {
 		t.Fatalf("error=%v", err)
 	}
@@ -245,10 +244,10 @@ func TestStartAgyWithSessionRejectsDifferentReportedConversation(t *testing.T) {
 
 func TestReportPaneSessionUsesUnguardedToken(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"ok"}}`}}}
-	if err := New(runner).ReportPaneSession(context.Background(), "w1:p2", "cagy:pane-owner", "session-123"); err != nil {
+	if err := New(runner).ReportPaneSession(context.Background(), "w1:p2", "herdr-tandem:pane-owner", "session-123"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:pane-owner", "--token", "cagy_session=session-123", "--token", "cagy_session_state=ready"}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:pane-owner", "--token", "herdr_tandem_session=session-123", "--token", "herdr_tandem_session_state=ready"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("args=%#v want=%#v", runner.calls[0], want)
 	}
@@ -256,10 +255,10 @@ func TestReportPaneSessionUsesUnguardedToken(t *testing.T) {
 
 func TestReportPaneSessionPendingUsesUnguardedToken(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"ok"}}`}}}
-	if err := New(runner).ReportPaneSessionPending(context.Background(), "w1:p2", "cagy:pane-owner"); err != nil {
+	if err := New(runner).ReportPaneSessionPending(context.Background(), "w1:p2", "herdr-tandem:pane-owner"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:pane-owner", "--token", "cagy_session_state=pending"}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:pane-owner", "--token", "herdr_tandem_session_state=pending"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("args=%#v want=%#v", runner.calls[0], want)
 	}
@@ -386,13 +385,13 @@ func TestGetAgentParsesAgySessionReference(t *testing.T) {
 	}
 }
 
-func TestStartAgyRetriesOnceAfterNewPaneBecomesAvailableShell(t *testing.T) {
+func TestStartAgentAgyRetriesOnceAfterNewPaneBecomesAvailableShell(t *testing.T) {
 	busy := proc.Result{ExitCode: 1, Stderr: `{"error":{"code":"agent_pane_busy","message":"agent target pane w1:p2 is not an available shell"},"id":"x"}`}
 	process := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"zsh","argv":["-zsh"]}]}}}`}
 	success := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"agent_info","agent":{"name":"developer","agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1"}}}`}
 	runner := &fakeRunner{results: []proc.Result{busy, process, success}}
 	client := New(runner)
-	agent, err := client.StartAgy(context.Background(), "developer", "w1:p2")
+	agent, err := client.StartAgent(context.Background(), testAgyStartSpec("developer", "w1:p2", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,13 +410,13 @@ func TestStartAgyRetriesOnceAfterNewPaneBecomesAvailableShell(t *testing.T) {
 	}
 }
 
-func TestStartAgyPaneBusyHonorsContextCancellationWithoutRetry(t *testing.T) {
+func TestStartAgentAgyPaneBusyHonorsContextCancellationWithoutRetry(t *testing.T) {
 	busy := proc.Result{ExitCode: 1, Stderr: `{"error":{"code":"agent_pane_busy","message":"agent target pane w1:p2 is not an available shell"},"id":"x"}`}
 	process := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"cloudflared","argv":["cloudflared"]}]}}}`}
 	runner := &fakeRunner{results: []proc.Result{busy, process}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := New(runner).StartAgy(ctx, "developer", "w1:p2")
+	_, err := New(runner).StartAgent(ctx, testAgyStartSpec("developer", "w1:p2", ""))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v, want context canceled", err)
 	}
@@ -438,10 +437,10 @@ func TestWaitForAvailableShellTimesOutWithLastForegroundProcess(t *testing.T) {
 func TestReportPaneRuntime(t *testing.T) {
 	runner := &fakeRunner{results: []proc.Result{{Stdout: `{"result":{}}`}}}
 	client := New(runner)
-	if err := client.ReportPaneRuntime(context.Background(), "w1:p2", "cagy:pane-owner", "runtime-123", "revision-456"); err != nil {
+	if err := client.ReportPaneRuntime(context.Background(), "w1:p2", "herdr-tandem:pane-owner", "runtime-123", "revision-456"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "cagy:pane-owner", "--token", "cagy_runtime_id=runtime-123", "--token", "cagy_build_revision=revision-456"}
+	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:pane-owner", "--token", "herdr_tandem_runtime_id=runtime-123", "--token", "herdr_tandem_build_revision=revision-456"}
 	if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("calls=%#v want=%#v", runner.calls, want)
 	}

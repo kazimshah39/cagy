@@ -1,97 +1,63 @@
-# cagy Project Structure
+# Herdr Tandem Project Structure
 
-**Status:** Router-mode architecture
-**Date:** September 20, 2026
+**Status:** Provider-managed, adapter-based architecture
+**Date:** September 21, 2026
 
 ## Purpose
 
-`cagy` creates one visible Codex supervisor and one visible `agy` developer in Herdr for each project.
+Herdr Tandem creates one visible supervisor and one visible `agy` developer in Herdr for each project. The supervisor can be Codex or OpenCode. The developer is currently agy.
+
+Herdr owns panes and agent lifecycle. Herdr Tandem owns project-scoped workflow orchestration, pane ownership checks, task journals, transcript delivery, and the local stdio MCP bridge.
+
+## Adapter model
 
 ```text
-Project A: Codex + agy ─┐
-Project B: Codex + agy ─┼─ 9Router Antigravity MITM ─ provider accounts
-Project C: Codex + agy ─┘
+Supervisor adapter: Codex or OpenCode
+             │
+             ├── shared Herdr Tandem MCP bridge
+             │
+Developer adapter: agy
+             │
+             └── Herdr antigravity-cli transcript/session integration
 ```
 
-Herdr owns the panes, terminal UI, and agent lifecycle. cagy owns only the project-scoped workflow, safe pane ownership checks, task journals, transcript delivery, and the local stdio MCP bridge.
+`internal/supervisor` contains launch contracts, registry, Codex, and OpenCode adapters. `internal/developer` contains the developer contract and the agy profile. `internal/app` remains the shared lifecycle and task engine.
 
-## Router ownership
+## Provider service boundary
 
-9Router owns all provider-account concerns:
+An external local service owns provider login, account selection, quota handling, and fallback. Herdr Tandem only checks `GET /api/health` before startup and delegation. It never reads, stores, or changes provider credentials or account state.
 
-- provider login and OAuth refresh;
-- account selection and account-level fallback;
-- quota and rate-limit handling;
-- the Antigravity MITM certificate, local HTTPS listener, and DNS/hosts routing.
-
-cagy never reads, writes, imports, rotates, probes, or stores provider credentials. It does not call `agy -p /model` or `agy -p /quota`. It does not start, stop, configure, or repair 9Router.
-
-Before starting a supervisor, before delegating a task, and in `cagy doctor`, cagy checks 9Router's public local health endpoint, `GET /api/health`. This confirms only that the external router is reachable. 9Router itself owns MITM readiness, certificate trust, DNS interception, and provider fallback.
-
-Set `CAGY_ROUTER_URL` only when 9Router is intentionally served at another loopback URL. The value is passed to the per-supervisor MCP bridge. Cagy never reads 9Router CLI tokens or private status endpoints.
+The agy developer adapter declares whether this service is required. This keeps the lifecycle engine independent of a specific provider implementation and leaves room for future developer adapters.
 
 ## Concurrent projects
 
-cagy stores one runtime record per supervisor under:
+Runtime records are stored per supervisor under:
 
 ```text
-~/Library/Application Support/cagy/state/runtimes/<runtime-id>.json
+~/Library/Application Support/herdr-tandem/state/runtimes/<runtime-id>.json
 ```
 
-Runtime ownership is scoped to the Herdr workspace, supervisor pane, developer name, and project. Different supervisor panes can run concurrently. A second cagy start from the same supervisor pane is rejected.
-
-A stale pre-router `runtime.json` is removed only after cagy proves it is not live. A live pre-router session must be stopped once before router-mode sessions begin.
+Records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
 
 ## Commands
 
 ```text
-cagy [DIRECTORY]
-cagy --show-agents [DIRECTORY]
-cagy doctor
-cagy stop
-cagy mcp-server                 # internal stdio bridge
-cagy ask --stdin                # compatibility/emergency fallback
-cagy ask --recover
-cagy ask --forget
+herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
+herdr-tandem doctor [--supervisor codex|opencode]
+herdr-tandem stop
+herdr-tandem mcp-server       # internal stdio bridge
+herdr-tandem ask --stdin      # emergency fallback
+herdr-tandem ask --recover
+herdr-tandem ask --forget
 ```
-
-There is no `cagy accounts` command.
-
-## Start flow
-
-1. Validate Apple Silicon macOS, Herdr context, required CLIs, Herdr's current `antigravity-cli` integration, and 9Router health.
-2. Create a project-scoped runtime record.
-3. Create and verify the right-hand agy developer pane.
-4. Start agy with required non-interactive flags.
-5. Start Codex with the per-invocation MCP bridge and trusted-project override.
-
-## Delegation flow
-
-1. Acquire a per-developer lock and verify there is no unresolved journal.
-2. Verify 9Router MITM is ready.
-3. Submit the original task exactly once through Herdr.
-4. Monitor visible agy state, transcript changes, blocked state, progress stalls, five-minute heartbeats, and the 30-minute deadline.
-5. Read only the exact task's final response from the agy JSONL transcript.
-6. Persist an acknowledgement receipt before delivery. The supervisor acknowledges that receipt after review.
-
-Cagy never retries a task merely because output is incomplete. A healthy-stall recovery may cancel the verified task and send one generic continuation prompt in the same conversation; it never repeats the original task text.
-
-## Security and diagnostics
-
-- cagy does not log task text, final answer text, provider credentials, OAuth data, 9Router API keys, complete environments, or transcripts.
-- Task journals contain task hashes and transcript offsets only.
-- Diagnostics are enabled during the September 2026 validation period at `~/Library/Application Support/cagy/state/logs/cagy.log`; `CAGY_DIAGNOSTICS=0` disables them for one run.
-- cagy does not configure certificates, DNS, `/etc/hosts`, sudo access, or Keychain items. Those are 9Router setup concerns.
 
 ## Testing
 
-Automated tests use fake Herdr/process runners and local HTTP test servers. They never launch real Codex or agy processes, mutate a provider account, consume quota, or configure MITM networking.
-
-Required checks:
+Tests use fake Herdr and process runners plus local fixtures. They do not launch real Codex, OpenCode, or agy sessions, change provider accounts, or consume quota.
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
-go build ./cmd/cagy
+go build ./cmd/herdr-tandem
 ```

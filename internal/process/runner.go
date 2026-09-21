@@ -16,7 +16,7 @@ type Result struct {
 	Stderr   string
 }
 
-// Runner is the process boundary used by cagy. Tests replace it with a fake.
+// Runner is the process boundary used by herdr-tandem. Tests replace it with a fake.
 type Runner interface {
 	LookPath(name string) (string, error)
 	Run(ctx context.Context, args ...string) (Result, error)
@@ -62,7 +62,7 @@ func (OSRunner) RunAttached(args []string, env []string) error {
 	if len(args) == 0 {
 		return errors.New("empty command")
 	}
-	// #nosec G204 -- callers choose the fixed Codex executable and pass no shell string.
+	// #nosec G204 -- callers choose a fixed supervisor executable and pass no shell string.
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

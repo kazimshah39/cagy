@@ -5,20 +5,20 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kazimshah39/cagy/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/herdr"
 )
 
-func (a *App) ensureAgyReady(ctx context.Context, paneID string) error {
+func (a *App) ensureDeveloperReady(ctx context.Context, paneID string) error {
 	output, err := a.herdr.ReadPane(ctx, paneID, 200)
 	if err != nil {
 		return fmt.Errorf("read agy startup screen: %w", err)
 	}
-	if strings.Contains(strings.ToLower(output), "trust the contents of this project") {
+	if strings.Contains(strings.ToLower(output), strings.ToLower(a.developerAdapter.TrustPrompt())) {
 		if err := a.herdr.SendPaneKeys(ctx, paneID, "enter"); err != nil {
 			return fmt.Errorf("accept agy project trust: %w", err)
 		}
 	}
-	if err := a.herdr.WaitPaneMatch(ctx, paneID, "? for shortcuts", durationMS(agyReadyTimeoutMS)); err != nil {
+	if err := a.herdr.WaitPaneMatch(ctx, paneID, a.developerAdapter.ReadyText(), durationMS(developerReadyTimeoutMS)); err != nil {
 		return fmt.Errorf("wait for agy readiness: %w", err)
 	}
 	return nil

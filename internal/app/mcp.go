@@ -57,13 +57,15 @@ type ForgetTaskOutput struct {
 type DeveloperStatusInput struct{}
 
 type DeveloperStatusOutput struct {
-	Developer    string `json:"developer"`
-	PaneID       string `json:"pane_id"`
-	Status       string `json:"status"`
-	Project      string `json:"project"`
-	SessionReady bool   `json:"session_ready"`
-	RouterReady  bool   `json:"router_ready"`
-	TaskSummary  string `json:"task_summary,omitempty"`
+	Supervisor           string `json:"supervisor"`
+	DeveloperKind        string `json:"developer_kind"`
+	Developer            string `json:"developer"`
+	PaneID               string `json:"pane_id"`
+	Status               string `json:"status"`
+	Project              string `json:"project"`
+	SessionReady         bool   `json:"session_ready"`
+	ProviderServiceReady bool   `json:"provider_service_ready"`
+	TaskSummary          string `json:"task_summary,omitempty"`
 }
 
 func boolPtr(b bool) *bool {
@@ -72,7 +74,7 @@ func boolPtr(b bool) *bool {
 
 func (a *App) newMCPServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "cagy",
+		Name:    "herdr-tandem",
 		Version: "0.1.0",
 	}, nil)
 

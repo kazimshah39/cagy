@@ -7,9 +7,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-echo "=== Testing cagy install.sh ==="
+echo "=== Testing herdr-tandem install.sh ==="
 
-TEST_TMP="$(mktemp -d 2>/dev/null || mktemp -d -t 'cagy-test-installer')"
+TEST_TMP="$(mktemp -d 2>/dev/null || mktemp -d -t 'herdr-tandem-test-installer')"
 SERVER_DIR="${TEST_TMP}/server"
 TARGET_LOCAL_SRC="${TEST_TMP}/bin_local_src"
 TARGET_PIPED_INSIDE_CLONE="${TEST_TMP}/bin_piped_inside_clone"
@@ -30,7 +30,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# cagy is intentionally tested only on Apple Silicon macOS.
+# herdr-tandem is intentionally tested only on Apple Silicon macOS.
 OS_RAW="$(uname -s)"
 ARCH_RAW="$(uname -m)"
 if [ "$OS_RAW" != "Darwin" ] || { [ "$ARCH_RAW" != "arm64" ] && [ "$ARCH_RAW" != "aarch64" ]; }; then
@@ -44,22 +44,22 @@ ARCH="arm64"
 # Prepare Mock HTTP Server with Source & Binary Assets
 # ----------------------------------------------------
 VERSION="0.1.0"
-ARCHIVE_NAME="cagy_${VERSION}_${OS}_${ARCH}.tar.gz"
+ARCHIVE_NAME="herdr-tandem_${VERSION}_${OS}_${ARCH}.tar.gz"
 
 # 1. Mock remote source tarball (archive.tar.gz)
-SRC_STAGE="${TEST_TMP}/src_stage/cagy-main"
-mkdir -p "${SRC_STAGE}/cmd/cagy" "${SRC_STAGE}/internal"
+SRC_STAGE="${TEST_TMP}/src_stage/herdr-tandem-main"
+mkdir -p "${SRC_STAGE}/cmd/herdr-tandem" "${SRC_STAGE}/internal"
 cp -r "${REPO_ROOT}/go.mod" "${SRC_STAGE}/"
 [ -f "${REPO_ROOT}/go.sum" ] && cp -r "${REPO_ROOT}/go.sum" "${SRC_STAGE}/"
 cp -r "${REPO_ROOT}/cmd" "${SRC_STAGE}/"
 cp -r "${REPO_ROOT}/internal" "${SRC_STAGE}/"
-tar -czf "${SERVER_DIR}/archive.tar.gz" -C "${TEST_TMP}/src_stage" cagy-main
+tar -czf "${SERVER_DIR}/archive.tar.gz" -C "${TEST_TMP}/src_stage" herdr-tandem-main
 
 # 2. Mock prebuilt release binary and checksums
 BIN_STAGE="${TEST_TMP}/bin_stage"
 mkdir -p "${BIN_STAGE}"
-CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "${REPO_ROOT}" -trimpath -ldflags "-s -w" -o "${BIN_STAGE}/cagy" ./cmd/cagy
-tar -czf "${SERVER_DIR}/${ARCHIVE_NAME}" -C "${BIN_STAGE}" cagy
+CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "${REPO_ROOT}" -trimpath -ldflags "-s -w" -o "${BIN_STAGE}/herdr-tandem" ./cmd/herdr-tandem
+tar -czf "${SERVER_DIR}/${ARCHIVE_NAME}" -C "${BIN_STAGE}" herdr-tandem
 
 if command -v sha256sum >/dev/null 2>&1; then
   REAL_SHA256="$(sha256sum "${SERVER_DIR}/${ARCHIVE_NAME}" | awk '{print $1}')"
@@ -88,16 +88,16 @@ OUTPUT_LOCAL=$(
   ./install.sh --dir "${TARGET_LOCAL_SRC}" --source 2>&1
 )
 
-if ! echo "$OUTPUT_LOCAL" | grep -q "Building cagy from local source tree"; then
+if ! echo "$OUTPUT_LOCAL" | grep -q "Building herdr-tandem from local source tree"; then
   echo "FAILED: direct local execution should have used local source tree. Output:" >&2
   echo "$OUTPUT_LOCAL" >&2
   exit 1
 fi
-if [ ! -x "${TARGET_LOCAL_SRC}/cagy" ]; then
-  echo "FAILED: binary not installed at ${TARGET_LOCAL_SRC}/cagy" >&2
+if [ ! -x "${TARGET_LOCAL_SRC}/herdr-tandem" ]; then
+  echo "FAILED: binary not installed at ${TARGET_LOCAL_SRC}/herdr-tandem" >&2
   exit 1
 fi
-"${TARGET_LOCAL_SRC}/cagy" --help >/dev/null
+"${TARGET_LOCAL_SRC}/herdr-tandem" --help >/dev/null
 echo "✓ Test 1 passed (direct local execution used local tree)"
 
 # ----------------------------------------------------
@@ -107,20 +107,20 @@ echo ""
 echo "Test 2: Piped installer launched from inside clone fetches remote source..."
 OUTPUT_PIPED=$(
   cd "${REPO_ROOT}"
-  cat install.sh | CAGY_DOWNLOAD_BASE_URL="${BASE_URL}" CAGY_INSTALL_DIR="${TARGET_PIPED_INSIDE_CLONE}" bash 2>&1
+  cat install.sh | HERDR_TANDEM_DOWNLOAD_BASE_URL="${BASE_URL}" HERDR_TANDEM_INSTALL_DIR="${TARGET_PIPED_INSIDE_CLONE}" bash 2>&1
 )
 
-if echo "$OUTPUT_PIPED" | grep -q "Building cagy from local source tree"; then
+if echo "$OUTPUT_PIPED" | grep -q "Building herdr-tandem from local source tree"; then
   echo "FAILED: piped execution inside clone must NEVER use local source tree! Output:" >&2
   echo "$OUTPUT_PIPED" >&2
   exit 1
 fi
-if ! echo "$OUTPUT_PIPED" | grep -q "Fetching cagy source"; then
+if ! echo "$OUTPUT_PIPED" | grep -q "Fetching herdr-tandem source"; then
   echo "FAILED: piped execution inside clone should have fetched remote source. Output:" >&2
   echo "$OUTPUT_PIPED" >&2
   exit 1
 fi
-if [ ! -x "${TARGET_PIPED_INSIDE_CLONE}/cagy" ]; then
+if [ ! -x "${TARGET_PIPED_INSIDE_CLONE}/herdr-tandem" ]; then
   echo "FAILED: binary not installed via piped execution inside clone" >&2
   exit 1
 fi
@@ -130,57 +130,57 @@ echo "✓ Test 2 passed (piped execution inside clone fetched remote source)"
 # Test 3: Environment variable applied to receiving bash process in pipe
 # ----------------------------------------------------
 echo ""
-echo "Test 3: CAGY_INSTALL_DIR passed to receiving bash process in pipe..."
+echo "Test 3: HERDR_TANDEM_INSTALL_DIR passed to receiving bash process in pipe..."
 (
   cd "${TEST_TMP}"
-  cat "${REPO_ROOT}/install.sh" | CAGY_DOWNLOAD_BASE_URL="${BASE_URL}" CAGY_INSTALL_DIR="${TARGET_ENV_PIPE}" bash
+  cat "${REPO_ROOT}/install.sh" | HERDR_TANDEM_DOWNLOAD_BASE_URL="${BASE_URL}" HERDR_TANDEM_INSTALL_DIR="${TARGET_ENV_PIPE}" bash
 )
 
-if [ ! -x "${TARGET_ENV_PIPE}/cagy" ]; then
+if [ ! -x "${TARGET_ENV_PIPE}/herdr-tandem" ]; then
   echo "FAILED: binary not installed to TARGET_ENV_PIPE via receiving bash env" >&2
   exit 1
 fi
-echo "✓ Test 3 passed (receiving bash process inherited CAGY_INSTALL_DIR)"
+echo "✓ Test 3 passed (receiving bash process inherited HERDR_TANDEM_INSTALL_DIR)"
 
 # ----------------------------------------------------
-# Test 4: Strict validation of CAGY_MODE
+# Test 4: Strict validation of HERDR_TANDEM_MODE
 # ----------------------------------------------------
 echo ""
-echo "Test 4: Strict validation of CAGY_MODE (reject invalid values)..."
+echo "Test 4: Strict validation of HERDR_TANDEM_MODE (reject invalid values)..."
 set +e
 INVALID_MODE_OUTPUT=$(
-  CAGY_MODE="unsupported_mode" "${REPO_ROOT}/install.sh" --dir "${TEST_TMP}" 2>&1
+  HERDR_TANDEM_MODE="unsupported_mode" "${REPO_ROOT}/install.sh" --dir "${TEST_TMP}" 2>&1
 )
 INVALID_MODE_STATUS=$?
 set -e
 
 if [ "$INVALID_MODE_STATUS" -eq 0 ]; then
-  echo "FAILED: invalid CAGY_MODE should have exited with error, but succeeded" >&2
+  echo "FAILED: invalid HERDR_TANDEM_MODE should have exited with error, but succeeded" >&2
   exit 1
 fi
 if ! echo "$INVALID_MODE_OUTPUT" | grep -q -i "invalid install mode"; then
   echo "FAILED: expected 'Invalid install mode' message, got: $INVALID_MODE_OUTPUT" >&2
   exit 1
 fi
-echo "✓ Test 4 passed (invalid CAGY_MODE rejected)"
+echo "✓ Test 4 passed (invalid HERDR_TANDEM_MODE rejected)"
 
 # ----------------------------------------------------
 # Test 5: Collision-safe temporary file and atomic rename
 # ----------------------------------------------------
 echo ""
 echo "Test 5: Collision-safe install and verification of no leftover temporary files..."
-CAGY_DOWNLOAD_BASE_URL="${BASE_URL}" "${REPO_ROOT}/install.sh" \
+HERDR_TANDEM_DOWNLOAD_BASE_URL="${BASE_URL}" "${REPO_ROOT}/install.sh" \
   --dir "${TARGET_BINARY}" \
   --version "v${VERSION}" \
   --binary >/dev/null
 
-if [ ! -x "${TARGET_BINARY}/cagy" ]; then
-  echo "FAILED: binary not installed at ${TARGET_BINARY}/cagy" >&2
+if [ ! -x "${TARGET_BINARY}/herdr-tandem" ]; then
+  echo "FAILED: binary not installed at ${TARGET_BINARY}/herdr-tandem" >&2
   exit 1
 fi
 
-# Ensure no temporary files (.cagy.install.* or *.tmp) remain in destination dir
-LEFTOVER_COUNT=$(find "${TARGET_BINARY}" -type f -name ".cagy.install.*" -o -name "*.tmp*" | wc -l | tr -d ' ')
+# Ensure no temporary files (.herdr-tandem.install.* or *.tmp) remain in destination dir
+LEFTOVER_COUNT=$(find "${TARGET_BINARY}" -type f -name ".herdr-tandem.install.*" -o -name "*.tmp*" | wc -l | tr -d ' ')
 if [ "$LEFTOVER_COUNT" -ne 0 ]; then
   echo "FAILED: leftover temporary files found in ${TARGET_BINARY}" >&2
   find "${TARGET_BINARY}" -type f
@@ -210,13 +210,13 @@ python3 -m http.server "${AMBIGUOUS_PORT}" --directory "${AMBIGUOUS_SERVER_DIR}"
 AMB_PID=$!
 sleep 1
 
-CAGY_DOWNLOAD_BASE_URL="http://127.0.0.1:${AMBIGUOUS_PORT}" "${REPO_ROOT}/install.sh" \
+HERDR_TANDEM_DOWNLOAD_BASE_URL="http://127.0.0.1:${AMBIGUOUS_PORT}" "${REPO_ROOT}/install.sh" \
   --dir "${TARGET_AMBIGUOUS}" \
   --version "v${VERSION}" \
   --binary >/dev/null
 kill "${AMB_PID}" 2>/dev/null || true
 
-if [ ! -x "${TARGET_AMBIGUOUS}/cagy" ]; then
+if [ ! -x "${TARGET_AMBIGUOUS}/herdr-tandem" ]; then
   echo "FAILED: ambiguous checksum matching failed to select the exact archive entry" >&2
   exit 1
 fi
@@ -241,7 +241,7 @@ sleep 1
 
 set +e
 MAL_OUTPUT=$(
-  CAGY_DOWNLOAD_BASE_URL="http://127.0.0.1:${MAL_PORT}" "${REPO_ROOT}/install.sh" \
+  HERDR_TANDEM_DOWNLOAD_BASE_URL="http://127.0.0.1:${MAL_PORT}" "${REPO_ROOT}/install.sh" \
     --dir "${TARGET_MALFORMED}" \
     --version "v${VERSION}" \
     --binary 2>&1

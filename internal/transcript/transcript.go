@@ -52,7 +52,7 @@ type Paths struct {
 	Full    string
 }
 
-// Event contains only the public response fields cagy reads from agy's JSONL.
+// Event contains only the public response fields herdr-tandem reads from agy's JSONL.
 type Event struct {
 	Source  string `json:"source"`
 	Type    string `json:"type"`
@@ -156,7 +156,7 @@ func TaskHash(task string) string {
 
 // FinalResponseForHash reads the exact task response after the captured
 // offsets using only the task's SHA-256 identifier. This supports safe
-// interrupted-caller recovery without writing prompt text to cagy state.
+// interrupted-caller recovery without writing prompt text to herdr-tandem state.
 func FinalResponseForHash(brainRoot string, ref Ref, checkpoint Checkpoint, taskHash string) (string, bool, error) {
 	state, err := FinalResponseStateForHash(brainRoot, ref, checkpoint, taskHash)
 	return state.Response, state.Found, err

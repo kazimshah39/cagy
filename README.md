@@ -63,10 +63,10 @@ Herdr currently supports one transient Agent view per server. Herdr Tandem uses 
 
 1. Herdr Tandem validates Herdr, the selected supervisor, `agy`, and the provider service.
 2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state` with the selected sidebar mode.
-3. It creates a visible right-hand developer pane and applies project-specific ownership, label, and visibility metadata.
+3. It creates a visible right-hand developer pane, validates agy startup readiness within a 60-second window (accepting project trust if shown), and applies project-specific ownership, label, and visibility metadata.
 4. It starts Codex or OpenCode in the current pane with a local stdio MCP bridge.
-5. The supervisor delegates through `delegate_task` and reviews the exact transcript result.
-6. Herdr Tandem journals task hashes and transcript offsets and requires acknowledgement receipts.
+5. The supervisor delegates implementation work through `delegate_task`, receiving the completed transcript answer alongside a delivery receipt (`completed_unacknowledged`).
+6. The supervisor calls `acknowledge_task(receipt="...")` after reviewing the output. If a session or command is interrupted, `task_status` indicates when recovery is possible and `recover_task` retrieves the answer and receipt without resubmitting the prompt.
 7. The provider service owns account selection, quota handling, and fallback.
 
 Each supervisor pane has its own runtime. A duplicate start from the same Herdr pane is rejected.

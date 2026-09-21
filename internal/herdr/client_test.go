@@ -410,6 +410,24 @@ func TestStartAgentAgyRetriesOnceAfterNewPaneBecomesAvailableShell(t *testing.T)
 	}
 }
 
+func TestStartAgentAgyRetriesMultipleTimesWhenPaneRemainsBusy(t *testing.T) {
+	busy := proc.Result{ExitCode: 1, Stderr: `{"error":{"code":"agent_pane_busy","message":"agent target pane w1:p2 is not an available shell"},"id":"x"}`}
+	process := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"zsh","argv":["-zsh"]}]}}}`}
+	success := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"agent_info","agent":{"name":"developer","agent":"agy","agent_status":"idle","pane_id":"w1:p2","workspace_id":"w1"}}}`}
+	runner := &fakeRunner{results: []proc.Result{busy, process, busy, process, success}}
+	client := New(runner)
+	agent, err := client.StartAgent(context.Background(), testAgyStartSpec("developer", "w1:p2", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.PaneID != "w1:p2" {
+		t.Fatalf("agent=%+v", agent)
+	}
+	if len(runner.calls) != 5 {
+		t.Fatalf("calls=%#v, want 5 calls", runner.calls)
+	}
+}
+
 func TestStartAgentAgyPaneBusyHonorsContextCancellationWithoutRetry(t *testing.T) {
 	busy := proc.Result{ExitCode: 1, Stderr: `{"error":{"code":"agent_pane_busy","message":"agent target pane w1:p2 is not an available shell"},"id":"x"}`}
 	process := proc.Result{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"cloudflared","argv":["cloudflared"]}]}}}`}

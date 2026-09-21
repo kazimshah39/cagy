@@ -75,6 +75,7 @@ type App struct {
 	cancellationIdleWait    time.Duration
 	agentStopTimeout        time.Duration
 	agentStopEscalation     time.Duration
+	developerReadyTimeout   time.Duration
 	setSidebarView          func(context.Context) error
 	clearSidebarView        func(context.Context) error
 	reportSidebarVisibility func(context.Context, string, herdr.PaneVisibility) error
@@ -112,6 +113,7 @@ func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 		cancellationIdleWait:  30 * time.Second,
 		agentStopTimeout:      15 * time.Second,
 		agentStopEscalation:   1500 * time.Millisecond,
+		developerReadyTimeout: time.Duration(developerReadyTimeoutMS) * time.Millisecond,
 		checkPlatform:         platform.Current,
 		runningBuild:          buildmeta.Running,
 		installedBuild:        buildmeta.ReadFile,

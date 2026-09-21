@@ -23,6 +23,10 @@ Developer adapter: agy
 
 `internal/supervisor` contains launch contracts, registry, Codex, and OpenCode adapters. `internal/developer` contains the developer contract and the agy profile. `internal/app` remains the shared lifecycle and task engine.
 
+## Developer readiness
+
+Developer startup validates readiness with a bounded 60-second deadline (`? for shortcuts`), interactively accepts the project trust screen if presented, and safely handles transient shell readiness races (`agent_pane_busy`) on newly split panes.
+
 ## Provider service boundary
 
 An external local service owns provider login, account selection, quota handling, and fallback. Herdr Tandem only checks `GET /api/health` before startup and delegation. It never reads, stores, or changes provider credentials or account state.
@@ -56,7 +60,7 @@ Herdr Tandem does not synthesize a combined agent or override native Herdr statu
 ## Commands
 
 ```text
-herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
+herdr-tandem [--show-agents] [--supervisor codex|opencode] [DIRECTORY]
 herdr-tandem doctor [--supervisor codex|opencode]
 herdr-tandem stop
 herdr-tandem mcp-server       # internal stdio bridge
@@ -64,6 +68,16 @@ herdr-tandem ask --stdin      # emergency fallback
 herdr-tandem ask --recover
 herdr-tandem ask --forget
 ```
+
+## Reliability diagnostics
+
+Diagnostics are enabled by default at:
+
+```text
+~/Library/Application Support/herdr-tandem/state/logs/herdr-tandem.log
+```
+
+Logs record starts, finishes, state transitions, retries, pane/agent lifecycle operations, MCP tool events, and errors while redacting plaintext prompts, answers, secrets, and credentials. Logs are bounded at 8 MiB with up to 5 rotated backups, directory mode `0700`, and file mode `0600`. Set `HERDR_TANDEM_DIAGNOSTICS=0` for an explicit single-run opt-out.
 
 ## Testing
 

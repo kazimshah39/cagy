@@ -466,7 +466,7 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 	existingReceipt := record.DeliveryReceipt
 
 	if developerErr != nil {
-		if responseState.Found && record.Phase == taskPhaseCompleted {
+		if responseState.Found && (record.Phase == taskPhaseCompleted || record.Phase == taskPhaseUncertain) && !responseState.BackgroundPending && !responseState.AwaitingResponse {
 			return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
 		}
 		return taskInspection{kind: taskInspectionUncertain, message: "developer is no longer running; inspect the saved task state before forgetting it"}, nil
@@ -487,14 +487,14 @@ func (a *App) inspectTaskJournal(ctx context.Context, info runtimeContext, recor
 	if devRunning {
 		return taskInspection{kind: taskInspectionRunning, developerRunning: true, message: "task is still running in the visible developer pane"}, nil
 	}
-	if record.Phase == taskPhaseUncertain {
-		return taskInspection{kind: taskInspectionUncertain, message: "the previous task ended without a complete matching response"}, nil
-	}
 	if responseState.BackgroundPending || responseState.AwaitingResponse {
 		return taskInspection{kind: taskInspectionRunning, developerRunning: false, message: "task is still running in the visible developer pane"}, nil
 	}
 	if responseState.Found && visibleState == "idle" {
 		return taskInspection{kind: taskInspectionCompleted, response: responseState.Response, receipt: existingReceipt, message: "task completed, but the previous caller may not have received the final answer"}, nil
+	}
+	if record.Phase == taskPhaseUncertain {
+		return taskInspection{kind: taskInspectionUncertain, message: "the previous task ended without a complete matching response"}, nil
 	}
 	if record.Phase == taskPhaseBlocked {
 		return taskInspection{kind: taskInspectionBlocked, message: "task was blocked; check the right pane"}, nil

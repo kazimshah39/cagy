@@ -272,17 +272,32 @@ func (c *Client) StartAgent(ctx context.Context, spec AgentStartSpec) (AgentInfo
 	if !IsCode(err, "agent_pane_busy") {
 		return AgentInfo{}, err
 	}
-	if waitErr := c.waitForAvailableShell(ctx, spec.PaneID, 15*time.Second); waitErr != nil {
-		if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
-			return AgentInfo{}, waitErr
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		waitErr := c.waitForAvailableShell(ctx, spec.PaneID, time.Until(deadline))
+		if waitErr != nil {
+			if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+				return AgentInfo{}, waitErr
+			}
+			return AgentInfo{}, fmt.Errorf("%w; wait for target shell: %v", err, waitErr)
 		}
-		return AgentInfo{}, fmt.Errorf("%w; wait for target shell: %v", err, waitErr)
+		result = agentResult{}
+		c.diagnosticf("herdr agent-start retry begin pane=%q kind=%q", spec.PaneID, spec.Kind)
+		retryErr := c.json(ctx, &result, args...)
+		if retryErr == nil {
+			c.diagnosticf("herdr agent-start retry success pane=%q status=%q", result.Agent.PaneID, result.Agent.AgentStatus)
+			return bindExpectedSession(spec.ExpectedSession, result.Agent)
+		}
+		c.diagnosticf("herdr agent-start retry error pane=%q error=%q", spec.PaneID, retryErr)
+		if !IsCode(retryErr, "agent_pane_busy") || time.Now().After(deadline) {
+			return AgentInfo{}, retryErr
+		}
+		select {
+		case <-ctx.Done():
+			return AgentInfo{}, ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
-	result = agentResult{}
-	if retryErr := c.json(ctx, &result, args...); retryErr != nil {
-		return AgentInfo{}, retryErr
-	}
-	return bindExpectedSession(spec.ExpectedSession, result.Agent)
 }
 
 func bindExpectedSession(expected *AgentSessionInfo, started AgentInfo) (AgentInfo, error) {

@@ -22,10 +22,12 @@ type delegateSidebarRunner struct {
 	conversationID string
 	transcriptRoot string
 	task           string
+	calls          [][]string
 }
 
 func (r *delegateSidebarRunner) LookPath(name string) (string, error) { return "/bin/" + name, nil }
 func (r *delegateSidebarRunner) Run(_ context.Context, args ...string) (proc.Result, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
 	joined := strings.Join(args, " ")
 	agentJSON := fmt.Sprintf(`{"name":%q,"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","cwd":%q,"agent":"agy","agent_status":"idle","agent_session":{"source":"herdr:antigravity_cli","agent":"agy","kind":"id","value":%q}}`, r.developer, r.project, r.conversationID)
 	switch {
@@ -266,5 +268,113 @@ func TestForgetTaskRestoresCompactSupervisor(t *testing.T) {
 	want := []string{"w1:p1=visible", "w1:p2=hidden"}
 	if strings.Join(visibility, ",") != strings.Join(want, ",") {
 		t.Fatalf("visibility=%v want=%v", visibility, want)
+	}
+}
+
+func TestRecoverTaskRecoversUncertainTaskWhenDeveloperFinishedVisiblyIdleWithTranscriptAnswer(t *testing.T) {
+	task := "interrupted task that finished later"
+	app := newDelegateSidebarFixture(t, sidebarModeCompact, task, io.Discard)
+	app.reportSidebarVisibility = func(context.Context, string, herdr.PaneVisibility) error { return nil }
+
+	info, err := app.context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	developer, err := app.herdr.GetAgent(context.Background(), info.developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := app.transcriptCheckpoint(developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Begin tracking as if a task was submitted
+	if err := app.beginTaskTracking(info, developer, task, checkpoint, taskPhaseSubmitting); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Caller interrupted (e.g. Ctrl-C), journal transitions to phase uncertain
+	if err := app.setTrackedPhase(taskPhaseUncertain, developer); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. agy kept working and writes completed transcript
+	runner := app.runner.(*delegateSidebarRunner)
+	if err := runner.writeCompletedTranscript(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. task_status should now report completed_unacknowledged (recoverable)
+	status, err := app.getTaskStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "completed_unacknowledged" || !status.Recoverable || !status.AcknowledgementRequired {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+
+	// 5. recoverTask returns answer and receipt without resubmitting
+	startCallCount := len(runner.calls)
+	recovered, err := app.recoverTask(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "completed_unacknowledged" || recovered.Answer != "completed answer" || recovered.Receipt == "" || !recovered.AcknowledgementRequired {
+		t.Fatalf("unexpected recovered result: %+v", recovered)
+	}
+
+	// Verify no new prompts were submitted
+	for _, call := range runner.calls[startCallCount:] {
+		if len(call) >= 3 && call[0] == "herdr" && call[1] == "agent" && call[2] == "prompt" {
+			t.Fatalf("recover_task unexpectedly resubmitted prompt: %#v", call)
+		}
+	}
+
+	// 6. acknowledgeTask succeeds and clears journal
+	if err := app.acknowledgeTask(context.Background(), recovered.Receipt); err != nil {
+		t.Fatal(err)
+	}
+	finalStatus, err := app.getTaskStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalStatus.Status != "none" {
+		t.Fatalf("expected status none after acknowledge, got %q", finalStatus.Status)
+	}
+}
+
+func TestRecoverTaskRefusesUncertainTaskWhileTranscriptNotComplete(t *testing.T) {
+	task := "still incomplete task"
+	app := newDelegateSidebarFixture(t, sidebarModeCompact, task, io.Discard)
+	app.reportSidebarVisibility = func(context.Context, string, herdr.PaneVisibility) error { return nil }
+
+	info, err := app.context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	developer, err := app.herdr.GetAgent(context.Background(), info.developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := app.transcriptCheckpoint(developer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.beginTaskTracking(info, developer, task, checkpoint, taskPhaseUncertain); err != nil {
+		t.Fatal(err)
+	}
+
+	// Transcript does not have completed answer
+	status, err := app.getTaskStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "uncertain" || status.Recoverable {
+		t.Fatalf("expected uncertain and non-recoverable, got: %+v", status)
+	}
+	_, err = app.recoverTask(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not safely recoverable yet") {
+		t.Fatalf("expected recovery refusal, got %v", err)
 	}
 }

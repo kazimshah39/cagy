@@ -6,7 +6,7 @@
 
 - Codex or OpenCode is the supervisor in the current/left pane.
 - agy is the developer in a right pane.
-- Herdr shows both agents and their lifecycle state.
+- Herdr shows one dynamic real-agent row in compact mode or both agents in expanded mode, using their native lifecycle state.
 
 Do not turn this into a general multi-agent framework.
 
@@ -50,6 +50,10 @@ Read `project-structure.md` before architecture changes and update it when a dec
 - Never resend an unresolved task automatically. Recover an exact completed answer with `herdr-tandem ask --recover`; require explicit `herdr-tandem ask --forget` for unrecoverable state.
 - Emit immediate and five-minute lifecycle messages to stderr while keeping the final developer answer alone on stdout.
 - Keep errors short and actionable.
+- Treat sidebar mode as required per-runtime state. Compact and expanded projects must never change each other.
+- Use Herdr's real agent rows and native statuses; never fake or synthesize a combined agent state.
+- For compact transitions, show the destination row before hiding the previous row so a partial failure cannot intentionally hide both.
+- Write sidebar metadata only at lifecycle transitions, never on watchdog polling or read-only status calls.
 
 ## Herdr Workflow
 

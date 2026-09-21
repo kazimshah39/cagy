@@ -561,6 +561,10 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	runtimeRecord, mode, err := a.runtimeSidebarRecord(info)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireLock(a.stateDir, info.developer, a.now())
 	if err != nil {
 		return err
@@ -589,6 +593,7 @@ func (a *App) recoverInterruptedTask(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("save delivery receipt before output: %w", err)
 	}
+	a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 	if _, err := fmt.Fprintln(a.stdout, inspection.response); err != nil {
 		return fmt.Errorf("write recovered agy response; retry herdr-tandem ask --recover: %w", err)
 	}
@@ -749,6 +754,10 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 	if err != nil {
 		return nil, err
 	}
+	runtimeRecord, mode, err := a.runtimeSidebarRecord(info)
+	if err != nil {
+		return nil, err
+	}
 	lock, err := acquireLock(a.stateDir, info.developer, a.now())
 	if err != nil {
 		return nil, err
@@ -776,6 +785,7 @@ func (a *App) recoverTask(ctx context.Context) (*RecoverTaskOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("save delivery receipt before recovery: %w", err)
 	}
+	a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 	a.debugf("task-recover success developer=%q task=%q response_bytes=%d", info.developer, debugHashPrefix(record.TaskHash), len(inspection.response))
 	return &RecoverTaskOutput{
 		Status:                  "completed_unacknowledged",
@@ -791,6 +801,10 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 		return nil, fmt.Errorf("forgetting task state requires explicit confirm=true")
 	}
 	info, err := a.context()
+	if err != nil {
+		return nil, err
+	}
+	runtimeRecord, mode, err := a.runtimeSidebarRecord(info)
 	if err != nil {
 		return nil, err
 	}
@@ -818,6 +832,7 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 		if a.activeTask != nil && a.activeTask.Developer == info.developer {
 			a.activeTask = nil
 		}
+		a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 		a.debugf("task-forget success developer=%q kind=%q", info.developer, "unreadable")
 		return &ForgetTaskOutput{Status: "forgotten", Message: "forgot unreadable interrupted-task state"}, nil
 	}
@@ -845,6 +860,7 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 	if a.activeTask != nil && a.activeTask.Developer == info.developer {
 		a.activeTask = nil
 	}
+	a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 	a.debugf("task-forget success developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), "normal")
 	return &ForgetTaskOutput{Status: "forgotten", Message: "forgot interrupted-task state"}, nil
 }

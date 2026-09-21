@@ -30,7 +30,7 @@ go vet ./...
 go build ./cmd/herdr-tandem
 ```
 
-Automated tests must use fake process runners and local fixtures. They must not launch real Codex, OpenCode, or agy sessions, consume model quota, or change a real provider account. The supported target is macOS Apple Silicon (`darwin/arm64`); do not add Linux, Windows, or Intel-only release targets.
+Automated tests must use fake process runners, local socket fixtures, and deterministic metadata call recording. Sidebar changes must cover compact and expanded isolation, safe show-before-hide ordering, partial failures, repair, recovery, last-runtime cleanup, and concurrent start/stop ordering. Tests must also prove watchdog and read-only status paths do not write presentation metadata. They must not launch real Codex, OpenCode, or agy sessions, consume model quota, or change a real provider account. The supported target is macOS Apple Silicon (`darwin/arm64`); do not add Linux, Windows, or Intel-only release targets.
 
 ## Pull requests
 

@@ -13,10 +13,11 @@ import (
 
 const tandemSidebarViewSource = "herdr-tandem:sidebar"
 
-// SetTandemSidebarCompact hides panes marked as herdr-tandem developers from Herdr's
-// Agent view. Other agents remain visible. Herdr supports one transient Agent
-// view per server, so this intentionally becomes the active projection.
-func (c *Client) SetTandemSidebarCompact(ctx context.Context) error {
+// SetTandemSidebarView installs Tandem's stable projection. It hides only rows
+// explicitly marked hidden, so compact and expanded runtimes can coexist and
+// unrelated agents remain visible. Herdr supports one transient Agent view per
+// server, so this intentionally becomes the active projection.
+func (c *Client) SetTandemSidebarView(ctx context.Context) error {
 	params := map[string]any{
 		"source": tandemSidebarViewSource,
 		"label":  "herdr-tandem",
@@ -24,15 +25,15 @@ func (c *Client) SetTandemSidebarCompact(ctx context.Context) error {
 			"op": "not",
 			"filter": map[string]any{
 				"op":    "eq",
-				"field": map[string]string{"token": "herdr_tandem_role"},
-				"value": "developer",
+				"field": map[string]string{"token": "herdr_tandem_sidebar_visibility"},
+				"value": "hidden",
 			},
 		},
 	}
 	return c.callAPI(ctx, "agent.view.set", params)
 }
 
-// ClearTandemSidebarView removes the compact projection only when herdr-tandem still
+// ClearTandemSidebarView removes the projection only when herdr-tandem still
 // owns it. A view installed by another Herdr tool is left unchanged.
 func (c *Client) ClearTandemSidebarView(ctx context.Context) error {
 	return c.callAPI(ctx, "agent.view.clear", map[string]any{

@@ -1,15 +1,8 @@
 # Herdr Tandem
 
-Herdr Tandem runs one visible supervisor and one visible `agy` developer inside Herdr.
-The supported supervisors are **Codex** and **OpenCode**. The developer remains `agy`.
+Herdr Tandem runs one supervisor and one `agy` developer inside Herdr. The supported supervisors are **Codex** and **OpenCode**. The developer remains `agy`.
 
-```text
-Project A: Herdr Tandem (Codex/OpenCode) + agy
-Project B: Herdr Tandem (Codex/OpenCode) + agy
-Project C: Herdr Tandem (Codex/OpenCode) + agy
-```
-
-Each project has an independent Herdr Tandem runtime. Provider access and account fallback stay outside this application.
+Each project has an independent Herdr Tandem runtime, so compact and expanded projects can run together without changing each other.
 
 ## Requirements
 
@@ -40,18 +33,43 @@ herdr-tandem ask --forget
 
 The default supervisor is Codex. OpenCode is selected explicitly with `--supervisor opencode`.
 
+## Sidebar modes
+
+The normal command starts a compact project:
+
+```bash
+herdr-tandem
+```
+
+Compact mode shows one real Herdr agent row named `herdr-tandem`:
+
+- The supervisor is shown while no Tandem-managed developer task is active.
+- The developer becomes the visible row before delegated work starts, so Herdr shows its native working or blocked indicator.
+- The supervisor becomes visible again after confirmed completion, safe recovery, safe forgetting, or stop.
+
+Expanded mode is selected per project:
+
+```bash
+herdr-tandem --show-agents
+```
+
+Expanded mode always shows `herdr-tandem Supervisor` and `agy Developer` as separate rows. Starting a compact project does not hide an expanded project's developer, and starting an expanded project does not expand other projects.
+
+Compact switching covers work submitted through Herdr Tandem. Work typed manually in the developer pane does not switch the compact representative automatically. Use expanded mode when both native states must remain visible.
+
+Herdr currently supports one transient Agent view per server. Herdr Tandem uses one stable projection that hides only panes carrying its explicit hidden visibility token. This keeps unrelated agents visible, but another tool that replaces Herdr's single transient view cannot be composed with Tandem's view.
+
 ## How it works
 
 1. Herdr Tandem validates Herdr, the selected supervisor, `agy`, and the provider service.
-2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state`.
-3. It starts a visible right-hand `agy` pane.
+2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state` with the selected sidebar mode.
+3. It creates a visible right-hand developer pane and applies project-specific ownership, label, and visibility metadata.
 4. It starts Codex or OpenCode in the current pane with a local stdio MCP bridge.
 5. The supervisor delegates through `delegate_task` and reviews the exact transcript result.
 6. Herdr Tandem journals task hashes and transcript offsets and requires acknowledgement receipts.
 7. The provider service owns account selection, quota handling, and fallback.
 
-Each supervisor pane has its own runtime, so multiple projects can run at the same time.
-A duplicate start from the same Herdr pane is rejected.
+Each supervisor pane has its own runtime. A duplicate start from the same Herdr pane is rejected.
 
 ## Safety
 
@@ -59,6 +77,7 @@ A duplicate start from the same Herdr pane is rejected.
 - Process arguments are passed as arrays; prompts and paths are never shell-interpolated.
 - State files are private (`0700` directories and `0600` files).
 - Diagnostics never contain prompts, answers, credentials, service secrets, or complete transcripts.
+- Sidebar metadata is written only on lifecycle transitions, not on every watchdog poll.
 - Automated tests never launch real agents or consume model quota.
 
 ## Development checks

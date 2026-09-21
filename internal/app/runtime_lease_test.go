@@ -2,15 +2,17 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kazimshah39/herdr-tandem/internal/securestate"
 )
 
 func runtimeTestRecord(t *testing.T, id, supervisor string) runtimeRecord {
 	t.Helper()
-	return runtimeRecord{RuntimeID: id, SupervisorKind: "codex", DeveloperKind: "agy", WorkspaceID: "w1", SupervisorPaneID: supervisor, Developer: developerName("w1", supervisor), Project: filepath.Clean(t.TempDir())}
+	return runtimeRecord{SidebarMode: string(sidebarModeCompact), RuntimeID: id, SupervisorKind: "codex", DeveloperKind: "agy", WorkspaceID: "w1", SupervisorPaneID: supervisor, Developer: developerName("w1", supervisor), Project: filepath.Clean(t.TempDir())}
 }
 
 func TestRuntimeRecordsAllowIndependentSupervisors(t *testing.T) {
@@ -119,5 +121,150 @@ func TestRuntimeRecordRejectsUnknownProfile(t *testing.T) {
 	record.SupervisorKind = "unknown"
 	if err := validateRuntimeRecord(record); err == nil {
 		t.Fatal("unknown supervisor profile accepted")
+	}
+}
+
+func TestRuntimeRecordVersion4RequiresKnownSidebarMode(t *testing.T) {
+	record := runtimeTestRecord(t, "one", "w1:p1")
+	record.Version = runtimeRecordVersion
+	record.CreatedAt = testRuntimeTime()
+	record.UpdatedAt = record.CreatedAt
+	for _, mode := range []string{"", "legacy", "COMPACT"} {
+		record.SidebarMode = mode
+		if err := validateRuntimeRecord(record); err == nil {
+			t.Fatalf("sidebar mode %q was accepted", mode)
+		}
+	}
+	for _, mode := range []string{string(sidebarModeCompact), string(sidebarModeExpanded)} {
+		record.SidebarMode = mode
+		if err := validateRuntimeRecord(record); err != nil {
+			t.Fatalf("sidebar mode %q: %v", mode, err)
+		}
+	}
+}
+
+func TestRuntimeRecordRejectsOldVersionWithoutMigration(t *testing.T) {
+	record := runtimeTestRecord(t, "one", "w1:p1")
+	record.Version = 3
+	record.CreatedAt = testRuntimeTime()
+	record.UpdatedAt = record.CreatedAt
+	if err := validateRuntimeRecord(record); err == nil {
+		t.Fatal("version 3 runtime record was accepted")
+	}
+}
+
+func TestRuntimeSidebarModeRejectsEnvironmentRecordMismatch(t *testing.T) {
+	app := New(fakeRunner{}, nil, nil)
+	app.stateDir = t.TempDir()
+	record := runtimeTestRecord(t, "one", "w1:p1")
+	prepared, err := app.runtimeManager().Prepare(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := runtimeContext{supervisorKind: prepared.SupervisorKind, developerKind: prepared.DeveloperKind, workspaceID: prepared.WorkspaceID, supervisor: prepared.SupervisorPaneID, developer: prepared.Developer, project: prepared.Project}
+	app.getenv = func(key string) string {
+		if key == sidebarModeEnv {
+			return string(sidebarModeExpanded)
+		}
+		return ""
+	}
+	if _, err := app.runtimeSidebarMode(info); err == nil {
+		t.Fatal("environment/record sidebar mismatch was accepted")
+	}
+	app.getenv = func(key string) string {
+		if key == sidebarModeEnv {
+			return string(sidebarModeCompact)
+		}
+		return ""
+	}
+	if mode, err := app.runtimeSidebarMode(info); err != nil || mode != sidebarModeCompact {
+		t.Fatalf("mode=%q err=%v", mode, err)
+	}
+}
+
+func testRuntimeTime() time.Time {
+	return time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
+}
+
+func TestRuntimeCleanupClearsViewOnlyAfterLastRecord(t *testing.T) {
+	manager := runtimeRecordManager{stateDir: t.TempDir()}
+	first, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "one", "w1:p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "two", "w1:p2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearCalls := 0
+	clear := func(context.Context) error { clearCalls++; return nil }
+	attempted, err := manager.RemoveAndClearViewIfLast(context.Background(), first.RuntimeID, clear)
+	if err != nil || attempted || clearCalls != 0 {
+		t.Fatalf("first removal attempted=%t calls=%d err=%v", attempted, clearCalls, err)
+	}
+	attempted, err = manager.RemoveAndClearViewIfLast(context.Background(), second.RuntimeID, clear)
+	if err != nil || !attempted || clearCalls != 1 {
+		t.Fatalf("last removal attempted=%t calls=%d err=%v", attempted, clearCalls, err)
+	}
+}
+
+func TestRuntimeCleanupReportsClearFailureAfterRecordRemoval(t *testing.T) {
+	manager := runtimeRecordManager{stateDir: t.TempDir()}
+	record, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "one", "w1:p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempted, err := manager.RemoveAndClearViewIfLast(context.Background(), record.RuntimeID, func(context.Context) error {
+		return errors.New("guarded clear failed")
+	})
+	if !attempted || err == nil {
+		t.Fatalf("attempted=%t err=%v", attempted, err)
+	}
+	if _, exists, loadErr := manager.loadByIDUnlocked(record.RuntimeID); loadErr != nil || exists {
+		t.Fatalf("record still exists=%t err=%v", exists, loadErr)
+	}
+}
+
+func TestRuntimeConcurrentLastStopSerializesWithNewStart(t *testing.T) {
+	manager := runtimeRecordManager{stateDir: t.TempDir()}
+	oldRecord, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "old", "w1:p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearEntered := make(chan struct{})
+	releaseClear := make(chan struct{})
+	removeDone := make(chan error, 1)
+	go func() {
+		_, removeErr := manager.RemoveAndClearViewIfLast(context.Background(), oldRecord.RuntimeID, func(context.Context) error {
+			close(clearEntered)
+			<-releaseClear
+			return nil
+		})
+		removeDone <- removeErr
+	}()
+	<-clearEntered
+	prepareDone := make(chan error, 1)
+	go func() {
+		_, prepareErr := manager.Prepare(context.Background(), runtimeTestRecord(t, "new", "w1:p2"))
+		prepareDone <- prepareErr
+	}()
+	var concurrentErr error
+	select {
+	case concurrentErr = <-prepareDone:
+		if concurrentErr == nil {
+			t.Fatal("new start escaped runtime lock while clear was active")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("concurrent start did not return a bounded lock result")
+	}
+	close(releaseClear)
+	if err := <-removeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Prepare(context.Background(), runtimeTestRecord(t, "new", "w1:p2")); err != nil {
+		t.Fatalf("new start did not succeed after cleanup lock released (first error %v): %v", concurrentErr, err)
+	}
+	if _, exists, err := manager.loadByIDUnlocked("new"); err != nil || !exists {
+		t.Fatalf("new runtime exists=%t err=%v", exists, err)
 	}
 }

@@ -131,7 +131,7 @@ func TestReportPaneOwnershipUsesPersistentUnguardedTokens(t *testing.T) {
 	}
 }
 
-func TestSetTandemSidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
+func TestSetTandemSidebarViewUsesDeveloperTokenFilter(t *testing.T) {
 	runner := &fakeRunner{}
 	client := New(runner)
 	var method string
@@ -141,7 +141,7 @@ func TestSetTandemSidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
 		params = gotParams
 		return nil
 	}
-	if err := client.SetTandemSidebarCompact(context.Background()); err != nil {
+	if err := client.SetTandemSidebarView(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if method != "agent.view.set" {
@@ -151,7 +151,7 @@ func TestSetTandemSidebarCompactUsesDeveloperTokenFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"filter":{"filter":{"field":{"token":"herdr_tandem_role"},"op":"eq","value":"developer"},"op":"not"},"label":"herdr-tandem","source":"herdr-tandem:sidebar"}`
+	want := `{"filter":{"filter":{"field":{"token":"herdr_tandem_sidebar_visibility"},"op":"eq","value":"hidden"},"op":"not"},"label":"herdr-tandem","source":"herdr-tandem:sidebar"}`
 	if string(encoded) != want {
 		t.Fatalf("params=%s", encoded)
 	}
@@ -443,5 +443,52 @@ func TestReportPaneRuntime(t *testing.T) {
 	want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:pane-owner", "--token", "herdr_tandem_runtime_id=runtime-123", "--token", "herdr_tandem_build_revision=revision-456"}
 	if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("calls=%#v want=%#v", runner.calls, want)
+	}
+}
+
+func TestReportPaneSidebarVisibilityUsesClosedTokenValues(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		visibility PaneVisibility
+		wantToken  string
+	}{
+		{name: "visible", visibility: PaneVisible, wantToken: "herdr_tandem_sidebar_visibility=visible"},
+		{name: "hidden", visibility: PaneHidden, wantToken: "herdr_tandem_sidebar_visibility=hidden"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []proc.Result{{ExitCode: 0, Stdout: `{"id":"x","result":{"type":"ok"}}`}}}
+			err := New(runner).ReportPaneSidebarVisibility(context.Background(), "w1:p2", test.visibility)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"herdr", "pane", "report-metadata", "w1:p2", "--source", "herdr-tandem:sidebar-visibility", "--token", test.wantToken}
+			if !reflect.DeepEqual(runner.calls[0], want) {
+				t.Fatalf("args=%#v want=%#v", runner.calls[0], want)
+			}
+		})
+	}
+
+	client := New(&fakeRunner{})
+	if err := client.ReportPaneSidebarVisibility(context.Background(), "w1:p2", PaneVisibility("other")); err == nil {
+		t.Fatal("arbitrary visibility value was accepted")
+	}
+}
+
+func TestTandemSidebarVisibilityProjectionKeepsVisibleAndUnrelatedRows(t *testing.T) {
+	entries := []struct {
+		name   string
+		tokens map[string]string
+		want   bool
+	}{
+		{name: "hidden tandem", tokens: map[string]string{"herdr_tandem_sidebar_visibility": "hidden"}, want: false},
+		{name: "visible tandem", tokens: map[string]string{"herdr_tandem_sidebar_visibility": "visible"}, want: true},
+		{name: "unrelated agent", tokens: map[string]string{"owner": "other"}, want: true},
+		{name: "missing tokens", tokens: nil, want: true},
+	}
+	for _, entry := range entries {
+		got := entry.tokens["herdr_tandem_sidebar_visibility"] != "hidden"
+		if got != entry.want {
+			t.Fatalf("%s visible=%t want=%t", entry.name, got, entry.want)
+		}
 	}
 }

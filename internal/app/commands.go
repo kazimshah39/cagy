@@ -60,12 +60,13 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		return fmt.Errorf("herdr-tandem supervisor tab is missing")
 	}
 	developerName := developerName(workspaceID, current.PaneID)
+	mode := sidebarModeFromShowAgents(showAgents)
 	startInfo := runtimeContext{supervisorKind: a.supervisor.ID(), developerKind: a.developerAdapter.ID(), workspaceID: workspaceID, supervisor: current.PaneID, developer: developerName, project: project}
 	buildRevision := "unknown"
 	if a.runningBuild != nil {
 		buildRevision = a.runningBuild().Fingerprint()
 	}
-	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{BuildRevision: buildRevision, SupervisorKind: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), WorkspaceID: workspaceID, SupervisorPaneID: current.PaneID, Developer: developerName, Project: project})
+	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{BuildRevision: buildRevision, SidebarMode: string(mode), SupervisorKind: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), WorkspaceID: workspaceID, SupervisorPaneID: current.PaneID, Developer: developerName, Project: project})
 	if err != nil {
 		return err
 	}
@@ -82,21 +83,20 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 	if err := a.herdr.ReportPaneRuntime(ctx, current.PaneID, paneOwnershipSource, prepared.RuntimeID, buildRevision); err != nil {
 		return fmt.Errorf("mark herdr-tandem supervisor runtime: %w", err)
 	}
-	supervisorDisplayName := compactSupervisorDisplayName
-	if showAgents {
-		supervisorDisplayName = expandedSupervisorDisplayName
+	if err := a.setPaneSidebarVisibility(ctx, current.PaneID, herdr.PaneVisible); err != nil {
+		return fmt.Errorf("show herdr-tandem supervisor: %w", err)
 	}
-	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, a.supervisor.ID(), supervisorDisplayName); err != nil {
+	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, a.supervisor.ID(), mode.supervisorDisplayName()); err != nil {
 		return fmt.Errorf("label herdr-tandem supervisor: %w", err)
 	}
-	if err := a.configureSidebar(ctx, showAgents); err != nil {
+	if err := a.setSidebarView(ctx); err != nil {
 		return fmt.Errorf("configure herdr-tandem sidebar: %w", err)
 	}
 
 	developer, getErr := a.herdr.GetAgent(ctx, developerName)
 	switch {
 	case getErr == nil:
-		if removeErr := a.runtimeManager().Remove(prepared.RuntimeID); removeErr != nil {
+		if _, removeErr := a.runtimeManager().RemoveAndClearViewIfLast(ctx, prepared.RuntimeID, a.clearSidebarView); removeErr != nil {
 			return fmt.Errorf("existing agy developer requires restart, and prepared runtime cleanup failed: %w", removeErr)
 		}
 		return fmt.Errorf("an existing agy developer is not owned by this herdr-tandem runtime; run herdr-tandem stop, then restart herdr-tandem")
@@ -114,6 +114,14 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		if err := a.markPaneRole(ctx, pane.PaneID, developerName, "developer"); err != nil {
 			_ = a.confirmClosePane(ctx, pane.PaneID)
 			return err
+		}
+		initialVisibility := herdr.PaneHidden
+		if mode == sidebarModeExpanded {
+			initialVisibility = herdr.PaneVisible
+		}
+		if err := a.setPaneSidebarVisibility(ctx, pane.PaneID, initialVisibility); err != nil {
+			_ = a.confirmClosePane(ctx, pane.PaneID)
+			return fmt.Errorf("set initial developer sidebar visibility: %w", err)
 		}
 		if err := a.herdr.ReportPaneRuntime(ctx, pane.PaneID, paneOwnershipSource, prepared.RuntimeID, buildRevision); err != nil {
 			_ = a.confirmClosePane(ctx, pane.PaneID)
@@ -145,7 +153,7 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 			keepRuntime = true
 			return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
 		}
-		if err := a.markDeveloperPane(ctx, startInfo, pane.PaneID); err != nil {
+		if err := a.markDeveloperPane(ctx, startInfo, pane.PaneID, mode); err != nil {
 			keepRuntime = true
 			return a.rollbackStartedAgent(ctx, startInfo, pane.PaneID, err)
 		}
@@ -161,11 +169,11 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		return fmt.Errorf("check existing developer: %w", getErr)
 	}
 	keepRuntime = true
-	mcpEnv, err := a.buildMCPEnvForRuntime(current, developerName, developer.PaneID, project, prepared.RuntimeID)
+	mcpEnv, err := a.buildMCPEnvForRuntime(current, developerName, developer.PaneID, project, prepared.RuntimeID, mode)
 	if err != nil {
 		return err
 	}
-	env := mergeEnv(a.environ(), map[string]string{"HERDR_TANDEM_PROJECT_DIR": project, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developer.PaneID, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, runtimeIDEnv: prepared.RuntimeID, supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()})
+	env := mergeEnv(a.environ(), map[string]string{"HERDR_TANDEM_PROJECT_DIR": project, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developer.PaneID, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, runtimeIDEnv: prepared.RuntimeID, sidebarModeEnv: string(mode), supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()})
 	launch, err := a.supervisor.BuildLaunch(supervisor.LaunchContext{ProjectDir: project, Executable: binPath, MCPEnv: mcpEnv, BaseEnv: env, Instructions: supervisorInstructions(a.now())})
 	if err != nil {
 		return fmt.Errorf("configure %s supervisor: %w", a.supervisor.DisplayName(), err)
@@ -173,16 +181,15 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 	return a.runner.RunAttached(launch.Args, launch.Env)
 }
 
-func (a *App) buildMCPEnv(current herdr.PaneInfo, developerName, developerPaneID, project string) (map[string]string, error) {
-	return a.buildMCPEnvForRuntime(current, developerName, developerPaneID, project, strings.TrimSpace(a.getenv(runtimeIDEnv)))
-}
-
-func (a *App) buildMCPEnvForRuntime(current herdr.PaneInfo, developerName, developerPaneID, project, runtimeID string) (map[string]string, error) {
+func (a *App) buildMCPEnvForRuntime(current herdr.PaneInfo, developerName, developerPaneID, project, runtimeID string, mode sidebarMode) (map[string]string, error) {
 	socketPath := strings.TrimSpace(a.getenv("HERDR_SOCKET_PATH"))
 	if socketPath == "" {
 		return nil, fmt.Errorf("herdr socket path is missing")
 	}
-	env := map[string]string{"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": current.WorkspaceID, "HERDR_PANE_ID": current.PaneID, "HERDR_SOCKET_PATH": socketPath, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developerPaneID, "HERDR_TANDEM_PROJECT_DIR": project, supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()}
+	if _, err := parseSidebarMode(string(mode)); err != nil {
+		return nil, err
+	}
+	env := map[string]string{"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": current.WorkspaceID, "HERDR_PANE_ID": current.PaneID, "HERDR_SOCKET_PATH": socketPath, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developerPaneID, "HERDR_TANDEM_PROJECT_DIR": project, supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID(), sidebarModeEnv: string(mode)}
 	if v := strings.TrimSpace(current.TabID); v != "" {
 		env["HERDR_TAB_ID"] = v
 	}
@@ -272,6 +279,10 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if err != nil {
 		return nil, err
 	}
+	mode, err := a.runtimeSidebarMode(info)
+	if err != nil {
+		return nil, err
+	}
 	switch developer.AgentStatus {
 	case "idle", "done":
 	case "working":
@@ -288,7 +299,16 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if err := a.beginTaskTracking(info, developer, task, checkpoint, taskPhaseSubmitting); err != nil {
 		return nil, fmt.Errorf("prepare durable task state: %w", err)
 	}
+	completed := false
+	developerPane := developer.PaneID
+	a.warnSidebarTransition(ctx, mode, info, developerPane, sidebarRepresentativeDeveloper)
+	defer func() {
+		a.reconcileSidebarAfterManagedTask(ctx, mode, info, developerPane, completed)
+	}()
 	result, taskErr := a.runDeveloperTask(ctx, info.developer, task, checkpoint)
+	if result.agent.PaneID != "" {
+		developerPane = result.agent.PaneID
+	}
 	if taskErr != nil {
 		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
 		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
@@ -308,6 +328,7 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if err := a.setTrackedPhase(taskPhaseCompleted, result.agent); err != nil {
 		return nil, fmt.Errorf("save completed task state before delivering output: %w", err)
 	}
+	completed = true
 	receipt := ""
 	if a.activeTask != nil {
 		receipt = a.activeTask.DeliveryReceipt
@@ -362,11 +383,12 @@ func (a *App) stop(ctx context.Context) error {
 		return err
 	}
 	manager := a.runtimeManager()
-	record, hasRecord, err := manager.FindForScope(info)
+	record, mode, err := a.runtimeSidebarRecord(info)
 	if err != nil {
-		return fmt.Errorf("read herdr-tandem runtime ownership: %w", err)
+		return err
 	}
-	if hasRecord && strings.TrimSpace(a.getenv(runtimeIDEnv)) != "" && a.getenv(runtimeIDEnv) != record.RuntimeID {
+	hasRecord := true
+	if strings.TrimSpace(a.getenv(runtimeIDEnv)) != "" && a.getenv(runtimeIDEnv) != record.RuntimeID {
 		return errors.New("herdr-tandem runtime ID is stale; restart the supervisor before stopping")
 	}
 	supervisor, err := a.supervisorPane(ctx, info)
@@ -379,6 +401,7 @@ func (a *App) stop(ctx context.Context) error {
 		if hasRecord && record.DeveloperPaneID != "" {
 			paneID = record.DeveloperPaneID
 		}
+		restored := false
 		if paneID != "" {
 			pane, paneErr := a.herdr.GetPane(ctx, paneID)
 			switch {
@@ -389,6 +412,8 @@ func (a *App) stop(ctx context.Context) error {
 				if pane.Tokens["herdr_tandem_owner"] != info.developer || pane.Tokens["herdr_tandem_role"] != "developer" {
 					return errors.New("managed developer pane ownership is invalid")
 				}
+				a.warnSidebarTransition(ctx, mode, info, paneID, sidebarRepresentativeSupervisor)
+				restored = true
 				if err := a.confirmClosePane(ctx, paneID); err != nil {
 					return err
 				}
@@ -397,9 +422,18 @@ func (a *App) stop(ctx context.Context) error {
 				return fmt.Errorf("verify stopped developer pane: %w", paneErr)
 			}
 		}
+		if !restored {
+			if showErr := a.setPaneSidebarVisibility(ctx, info.supervisor, herdr.PaneVisible); showErr != nil {
+				fmt.Fprintf(a.stderr, "herdr-tandem warning: supervisor sidebar state could not be restored: %v\n", showErr)
+			}
+		}
 		if hasRecord {
-			if err := manager.Remove(record.RuntimeID); err != nil {
-				return fmt.Errorf("clear herdr-tandem runtime ownership: %w", err)
+			clearAttempted, removeErr := manager.RemoveAndClearViewIfLast(ctx, record.RuntimeID, a.clearSidebarView)
+			if removeErr != nil && !clearAttempted {
+				return fmt.Errorf("clear herdr-tandem runtime ownership: %w", removeErr)
+			}
+			if removeErr != nil {
+				fmt.Fprintf(a.stderr, "herdr-tandem warning: stopped runtime but could not clear sidebar view: %v\n", removeErr)
 			}
 		}
 		fmt.Fprintln(a.stdout, "herdr-tandem developer is not running")
@@ -414,6 +448,7 @@ func (a *App) stop(ctx context.Context) error {
 	if hasRecord && record.DeveloperPaneID != "" && record.DeveloperPaneID != developer.PaneID {
 		return errors.New("herdr-tandem runtime pane does not match the visible developer")
 	}
+	a.warnSidebarTransition(ctx, mode, info, developer.PaneID, sidebarRepresentativeSupervisor)
 	if err := a.interruptAndWaitAgent(ctx, info.developer); err != nil {
 		if errors.Is(err, errAgentReleaseTimeout) {
 			return fmt.Errorf("wait for agy developer to stop: %w", err)
@@ -424,8 +459,12 @@ func (a *App) stop(ctx context.Context) error {
 		return err
 	}
 	if hasRecord {
-		if err := manager.Remove(record.RuntimeID); err != nil {
-			return fmt.Errorf("clear herdr-tandem runtime ownership: %w", err)
+		clearAttempted, removeErr := manager.RemoveAndClearViewIfLast(ctx, record.RuntimeID, a.clearSidebarView)
+		if removeErr != nil && !clearAttempted {
+			return fmt.Errorf("clear herdr-tandem runtime ownership: %w", removeErr)
+		}
+		if removeErr != nil {
+			fmt.Fprintf(a.stderr, "herdr-tandem warning: stopped runtime but could not clear sidebar view: %v\n", removeErr)
 		}
 	}
 	fmt.Fprintf(a.stdout, "stopped the agy developer; exit %s normally to finish\n", a.supervisor.DisplayName())

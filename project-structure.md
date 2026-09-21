@@ -5,7 +5,7 @@
 
 ## Purpose
 
-Herdr Tandem creates one visible supervisor and one visible `agy` developer in Herdr for each project. The supervisor can be Codex or OpenCode. The developer is currently agy.
+Herdr Tandem creates one supervisor and one `agy` developer in Herdr for each project. The supervisor can be Codex or OpenCode. The developer is currently agy. Each runtime chooses compact or expanded sidebar presentation independently.
 
 Herdr owns panes and agent lifecycle. Herdr Tandem owns project-scoped workflow orchestration, pane ownership checks, task journals, transcript delivery, and the local stdio MCP bridge.
 
@@ -37,7 +37,21 @@ Runtime records are stored per supervisor under:
 ~/Library/Application Support/herdr-tandem/state/runtimes/<runtime-id>.json
 ```
 
-Records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
+Version 4 records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, required `sidebar_mode`, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
+
+## Sidebar architecture
+
+Herdr exposes one transient Agent view per server, so Herdr Tandem installs one stable projection while any Tandem runtime exists. The projection hides only rows whose `herdr_tandem_sidebar_visibility` token is exactly `hidden`; rows without that token remain visible. Final cleanup is source-guarded and occurs under the runtime-state lock only after the last runtime record is removed.
+
+Each runtime stores `sidebar_mode` as `compact` or `expanded`:
+
+- Expanded mode keeps both owned panes visible with distinct labels.
+- Compact mode shows one real agent row. It shows the supervisor at rest and the developer during a Tandem-managed submitting, working, blocked, or unresolved task.
+- Compact transitions show the destination before hiding the previous row. A partial failure can temporarily show both rows but must not intentionally hide both.
+- Recovery and repair use the persisted mode after validating workspace, tab, project, owner, role, runtime, and environment agreement.
+- `task_status` and `developer_status` are read-only. Watchdog polling never writes sidebar metadata.
+
+Herdr Tandem does not synthesize a combined agent or override native Herdr status. Manual work started directly in the developer pane is outside compact automatic switching because this application does not run a persistent watcher.
 
 ## Commands
 

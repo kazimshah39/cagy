@@ -173,6 +173,29 @@ func (c *Client) ReportAgentDisplay(ctx context.Context, paneID, source, agent, 
 // ReportPaneOwnership records stable herdr-tandem ownership independently of the agent
 // process. These tokens remain available while agy is stopped, which lets herdr-tandem
 // repair a missing managed agent without claiming unrelated panes.
+
+// PaneVisibility is the closed visibility value understood by Tandem's stable
+// Agent view projection.
+type PaneVisibility string
+
+const (
+	PaneVisible PaneVisibility = "visible"
+	PaneHidden  PaneVisibility = "hidden"
+)
+
+// ReportPaneSidebarVisibility changes only Tandem's dedicated visibility token.
+// The closed value type prevents callers from writing arbitrary metadata.
+func (c *Client) ReportPaneSidebarVisibility(ctx context.Context, paneID string, visibility PaneVisibility) error {
+	if visibility != PaneVisible && visibility != PaneHidden {
+		return fmt.Errorf("invalid herdr-tandem sidebar visibility %q", visibility)
+	}
+	return c.json(ctx, nil,
+		"pane", "report-metadata", paneID,
+		"--source", "herdr-tandem:sidebar-visibility",
+		"--token", "herdr_tandem_sidebar_visibility="+string(visibility),
+	)
+}
+
 func (c *Client) ReportPaneOwnership(ctx context.Context, paneID, source, owner, role string) error {
 	return c.json(ctx, nil,
 		"pane", "report-metadata", paneID,

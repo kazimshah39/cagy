@@ -103,11 +103,11 @@ func TestMCPEnvironmentCarriesWorkflowProfile(t *testing.T) {
 		}
 		return ""
 	}
-	env, err := app.buildMCPEnvForRuntime(herdr.PaneInfo{WorkspaceID: "w1", PaneID: "w1:p1", TabID: "w1:t1"}, "developer", "w1:p2", "/tmp/project", "runtime")
+	env, err := app.buildMCPEnvForRuntime(herdr.PaneInfo{WorkspaceID: "w1", PaneID: "w1:p1", TabID: "w1:t1"}, "developer", "w1:p2", "/tmp/project", "runtime", sidebarModeExpanded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env[supervisorKindEnv] != "opencode" || env[developerKindEnv] != "agy" {
+	if env[supervisorKindEnv] != "opencode" || env[developerKindEnv] != "agy" || env[sidebarModeEnv] != "expanded" {
 		t.Fatalf("env=%#v", env)
 	}
 }

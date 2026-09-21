@@ -54,7 +54,7 @@ func TestTandemSidebarViewUsesHerdrJSONSocketAPI(t *testing.T) {
 		}
 	}()
 
-	if err := New(&fakeRunner{}).SetTandemSidebarCompact(context.Background()); err != nil {
+	if err := New(&fakeRunner{}).SetTandemSidebarView(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	select {

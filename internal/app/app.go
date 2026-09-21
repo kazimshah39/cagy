@@ -51,37 +51,39 @@ func supervisorInstructions(now time.Time) string {
 
 // App owns command parsing and the fixed herdr-tandem workflow.
 type App struct {
-	supervisor            supervisor.Adapter
-	developerAdapter      developer.Adapter
-	runner                proc.Runner
-	herdr                 *herdr.Client
-	stdin                 io.Reader
-	stdout                io.Writer
-	stderr                io.Writer
-	getenv                func(string) string
-	environ               func() []string
-	stateDir              string
-	activeTask            *taskJournal
-	token                 func() (string, error)
-	now                   func() time.Time
-	transcriptRoot        string
-	transcriptWait        time.Duration
-	missingTranscriptWait time.Duration
-	developerPoll         time.Duration
-	initialPromptWait     time.Duration
-	healthyStallWindow    time.Duration
-	heartbeatInterval     time.Duration
-	taskDeadline          time.Duration
-	cancellationIdleWait  time.Duration
-	agentStopTimeout      time.Duration
-	agentStopEscalation   time.Duration
-	configureSidebar      func(context.Context, bool) error
-	resolveExecutable     func() (string, error)
-	checkPlatform         func() error
-	runningBuild          func() buildmeta.Identity
-	installedBuild        func(string) (buildmeta.Identity, error)
-	providerServiceCheck  func(context.Context) error
-	diagnosticSink        func(string)
+	supervisor              supervisor.Adapter
+	developerAdapter        developer.Adapter
+	runner                  proc.Runner
+	herdr                   *herdr.Client
+	stdin                   io.Reader
+	stdout                  io.Writer
+	stderr                  io.Writer
+	getenv                  func(string) string
+	environ                 func() []string
+	stateDir                string
+	activeTask              *taskJournal
+	token                   func() (string, error)
+	now                     func() time.Time
+	transcriptRoot          string
+	transcriptWait          time.Duration
+	missingTranscriptWait   time.Duration
+	developerPoll           time.Duration
+	initialPromptWait       time.Duration
+	healthyStallWindow      time.Duration
+	heartbeatInterval       time.Duration
+	taskDeadline            time.Duration
+	cancellationIdleWait    time.Duration
+	agentStopTimeout        time.Duration
+	agentStopEscalation     time.Duration
+	setSidebarView          func(context.Context) error
+	clearSidebarView        func(context.Context) error
+	reportSidebarVisibility func(context.Context, string, herdr.PaneVisibility) error
+	resolveExecutable       func() (string, error)
+	checkPlatform           func() error
+	runningBuild            func() buildmeta.Identity
+	installedBuild          func(string) (buildmeta.Identity, error)
+	providerServiceCheck    func(context.Context) error
+	diagnosticSink          func(string)
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
@@ -118,12 +120,9 @@ func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 	application.resolveExecutable = func() (string, error) {
 		return resolveExecutable(os.Executable)
 	}
-	application.configureSidebar = func(ctx context.Context, showAgents bool) error {
-		if showAgents {
-			return herdrClient.ClearTandemSidebarView(ctx)
-		}
-		return herdrClient.SetTandemSidebarCompact(ctx)
-	}
+	application.setSidebarView = herdrClient.SetTandemSidebarView
+	application.clearSidebarView = herdrClient.ClearTandemSidebarView
+	application.reportSidebarVisibility = herdrClient.ReportPaneSidebarVisibility
 	return application
 }
 

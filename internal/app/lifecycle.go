@@ -138,11 +138,11 @@ func (a *App) markPaneRole(ctx context.Context, paneID, owner, role string) erro
 	return nil
 }
 
-func (a *App) markDeveloperPane(ctx context.Context, info runtimeContext, paneID string) error {
+func (a *App) markDeveloperPane(ctx context.Context, info runtimeContext, paneID string, mode sidebarMode) error {
 	if err := a.markPaneRole(ctx, paneID, info.developer, "developer"); err != nil {
 		return err
 	}
-	if err := a.herdr.ReportAgentDisplay(ctx, paneID, developerDisplaySource, a.developerAdapter.HerdrAgent(), developerDisplayName); err != nil {
+	if err := a.herdr.ReportAgentDisplay(ctx, paneID, developerDisplaySource, a.developerAdapter.HerdrAgent(), mode.developerDisplayName()); err != nil {
 		return fmt.Errorf("label herdr-tandem developer: %w", err)
 	}
 	return nil
@@ -436,6 +436,10 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 	if err != nil {
 		return herdr.AgentInfo{}, err
 	}
+	runtimeLease, mode, err := a.runtimeSidebarRecord(info)
+	if err != nil {
+		return herdr.AgentInfo{}, err
+	}
 	pane, err := a.findRepairPane(ctx, info, supervisor)
 	if err != nil {
 		return herdr.AgentInfo{}, err
@@ -472,6 +476,22 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 			_ = a.herdr.ClosePane(ctx, pane.PaneID)
 		}
 		return herdr.AgentInfo{}, err
+	}
+	visibility := herdr.PaneHidden
+	if mode == sidebarModeExpanded {
+		visibility = herdr.PaneVisible
+	}
+	if err := a.setPaneSidebarVisibility(ctx, pane.PaneID, visibility); err != nil {
+		if created {
+			_ = a.herdr.ClosePane(ctx, pane.PaneID)
+		}
+		return herdr.AgentInfo{}, fmt.Errorf("restore developer sidebar visibility: %w", err)
+	}
+	if err := a.herdr.ReportPaneRuntime(ctx, pane.PaneID, paneOwnershipSource, runtimeLease.RuntimeID, runtimeLease.BuildRevision); err != nil {
+		return herdr.AgentInfo{}, fmt.Errorf("restore developer runtime ownership: %w", err)
+	}
+	if _, err := a.runtimeManager().Update(runtimeLease.RuntimeID, func(record *runtimeRecord) error { record.DeveloperPaneID = pane.PaneID; return nil }); err != nil {
+		return herdr.AgentInfo{}, fmt.Errorf("save repaired developer pane: %w", err)
 	}
 	_ = a.herdr.RenamePane(ctx, pane.PaneID, developerPaneLabel)
 	var developer herdr.AgentInfo
@@ -520,7 +540,7 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 	if err := a.validateDeveloperSession(developer, info, supervisor); err != nil {
 		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, pane.PaneID, err)
 	}
-	if err := a.markDeveloperPane(ctx, info, pane.PaneID); err != nil {
+	if err := a.markDeveloperPane(ctx, info, pane.PaneID, mode); err != nil {
 		return herdr.AgentInfo{}, a.rollbackStartedAgent(ctx, info, pane.PaneID, err)
 	}
 	if sessionID != "" {

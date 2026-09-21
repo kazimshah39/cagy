@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	runtimeRecordVersion = 3
+	runtimeRecordVersion = 4
 	runtimeRecordsDir    = "runtimes"
 	runtimeStateLockFile = "runtime-state.lock"
 	maxRuntimeRecordSize = 32 << 10
@@ -31,6 +31,7 @@ type runtimeRecord struct {
 	DeveloperKind    string    `json:"developer_kind"`
 	RuntimeID        string    `json:"runtime_id"`
 	BuildRevision    string    `json:"build_revision,omitempty"`
+	SidebarMode      string    `json:"sidebar_mode"`
 	WorkspaceID      string    `json:"workspace_id"`
 	SupervisorPaneID string    `json:"supervisor_pane_id"`
 	Developer        string    `json:"developer"`
@@ -130,6 +131,9 @@ func validateRuntimeRecord(record runtimeRecord) error {
 	}
 	if record.DeveloperKind != developer.AgyID {
 		return fmt.Errorf("developer kind %q is unsupported", record.DeveloperKind)
+	}
+	if _, err := parseSidebarMode(record.SidebarMode); err != nil {
+		return err
 	}
 	if filepath.Clean(record.Project) != record.Project || !filepath.IsAbs(record.Project) {
 		return errors.New("project is invalid")
@@ -266,17 +270,43 @@ func (m runtimeRecordManager) Update(id string, update func(*runtimeRecord) erro
 	})
 	return updated, err
 }
-func (m runtimeRecordManager) Remove(id string) error {
-	return m.withLock("runtime-remove", func() error {
-		_, exists, err := m.loadByIDUnlocked(id)
-		if err != nil {
+func (m runtimeRecordManager) hasRuntimeRecordsUnlocked() (bool, error) {
+	entries, err := os.ReadDir(m.recordsDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// RemoveAndClearViewIfLast serializes record removal with the final no-runtime
+// check and the source-guarded Herdr view clear. This prevents a concurrent
+// start from being left without Tandem's stable projection.
+func (m runtimeRecordManager) RemoveAndClearViewIfLast(ctx context.Context, id string, clear func(context.Context) error) (bool, error) {
+	clearAttempted := false
+	err := m.withLock("runtime-remove-and-view-cleanup", func() error {
+		if _, exists, err := m.loadByIDUnlocked(id); err != nil {
+			return err
+		} else if exists {
+			if err := m.removeUnlocked(id); err != nil {
+				return err
+			}
+		}
+		remaining, err := m.hasRuntimeRecordsUnlocked()
+		if err != nil || remaining || clear == nil {
 			return err
 		}
-		if !exists {
-			return nil
-		}
-		return m.removeUnlocked(id)
+		clearAttempted = true
+		return clear(ctx)
 	})
+	return clearAttempted, err
 }
 
 // Load supports diagnostics that inspect the current runtime scope.
@@ -387,7 +417,7 @@ func (a *App) runtimeRecordLiveness(ctx context.Context, record runtimeRecord) (
 }
 func (a *App) cleanupPreparedRuntime(ctx context.Context, id string) {
 	manager := a.runtimeManager()
-	_ = manager.withLock("runtime-cleanup", func() error {
+	err := manager.withLock("runtime-cleanup", func() error {
 		record, exists, err := manager.loadByIDUnlocked(id)
 		if err != nil || !exists {
 			return err
@@ -396,6 +426,16 @@ func (a *App) cleanupPreparedRuntime(ctx context.Context, id string) {
 		if err != nil || live.Live() {
 			return err
 		}
-		return manager.removeUnlocked(id)
+		if err := manager.removeUnlocked(id); err != nil {
+			return err
+		}
+		remaining, err := manager.hasRuntimeRecordsUnlocked()
+		if err != nil || remaining || a.clearSidebarView == nil {
+			return err
+		}
+		return a.clearSidebarView(ctx)
 	})
+	if err != nil {
+		a.debugf("runtime cleanup id=%q ok=false error=%q", id, err)
+	}
 }

@@ -404,7 +404,11 @@ chmod 755 "$TARGET_TMP"
 mv -f "$TARGET_TMP" "$INSTALL_DIR/herdr-tandem"
 TARGET_TMP=""
 
+# Create shorthand symlink alongside canonical binary
+ln -sf herdr-tandem "$INSTALL_DIR/hdt"
+
 echo "✓ Successfully installed herdr-tandem to ${INSTALL_DIR}/herdr-tandem"
+echo "✓ Configured shorthand alias ${INSTALL_DIR}/hdt -> herdr-tandem"
 
 # PATH verification & guidance
 case ":$PATH:" in
@@ -413,7 +417,7 @@ case ":$PATH:" in
   *)
     echo ""
     echo "Note: ${INSTALL_DIR} is not currently in your PATH."
-    echo "To run herdr-tandem directly, add it to your shell profile:"
+    echo "To run herdr-tandem and hdt directly, add it to your shell profile:"
     echo ""
     echo "  # For zsh (~/.zshrc):"
     echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""

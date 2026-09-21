@@ -49,8 +49,8 @@ Herdr exposes one transient Agent view per server, so Herdr Tandem installs one 
 
 Each runtime stores `sidebar_mode` as `compact` or `expanded`:
 
-- Expanded mode keeps both owned panes visible with distinct labels.
-- Compact mode shows one real agent row. It shows the supervisor at rest and the developer during a Tandem-managed submitting, working, blocked, or unresolved task.
+- Expanded mode keeps both owned panes visible with distinct labels (`hdt Supervisor` and `agy Developer`).
+- Compact mode shows one real agent row labeled `hdt`. It shows the supervisor at rest and the developer during a Tandem-managed submitting, working, blocked, or unresolved task.
 - Compact transitions show the destination before hiding the previous row. A partial failure can temporarily show both rows but must not intentionally hide both.
 - Recovery and repair use the persisted mode after validating workspace, tab, project, owner, role, runtime, and environment agreement.
 - `task_status` and `developer_status` are read-only. Watchdog polling never writes sidebar metadata.
@@ -58,6 +58,8 @@ Each runtime stores `sidebar_mode` as `compact` or `expanded`:
 Herdr Tandem does not synthesize a combined agent or override native Herdr status. Manual work started directly in the developer pane is outside compact automatic switching because this application does not run a persistent watcher.
 
 ## Commands
+
+`herdr-tandem` is the canonical command; `hdt` is available alongside it as a shorthand alias.
 
 ```text
 herdr-tandem [--show-agents] [--supervisor codex|opencode] [DIRECTORY]
@@ -67,6 +69,11 @@ herdr-tandem mcp-server       # internal stdio bridge
 herdr-tandem ask --stdin      # emergency fallback
 herdr-tandem ask --recover
 herdr-tandem ask --forget
+
+# Shorthand alias:
+hdt [--show-agents] [--supervisor codex|opencode] [DIRECTORY]
+hdt doctor [--supervisor codex|opencode]
+hdt stop
 ```
 
 ## Reliability diagnostics

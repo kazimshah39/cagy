@@ -23,12 +23,36 @@ func TestSidebarModeParsingLabelsAndFlagMapping(t *testing.T) {
 		}
 	}
 	compact, err := parseSidebarMode(" compact ")
-	if err != nil || compact.supervisorDisplayName() != "herdr-tandem" || compact.developerDisplayName() != "herdr-tandem" {
+	if err != nil || compact.supervisorDisplayName() != "hdt" || compact.developerDisplayName() != "hdt" {
 		t.Fatalf("compact=%q err=%v", compact, err)
 	}
 	expanded, err := parseSidebarMode("expanded")
-	if err != nil || expanded.supervisorDisplayName() != "herdr-tandem Supervisor" || expanded.developerDisplayName() != "agy Developer" {
+	if err != nil || expanded.supervisorDisplayName() != "hdt Supervisor" || expanded.developerDisplayName() != "agy Developer" {
 		t.Fatalf("expanded=%q err=%v", expanded, err)
+	}
+}
+
+func TestSidebarDisplayLabels(t *testing.T) {
+	if compactDisplayName != "hdt" {
+		t.Fatalf("compact display name = %q, want %q", compactDisplayName, "hdt")
+	}
+	if expandedSupervisorDisplayName != "hdt Supervisor" {
+		t.Fatalf("expanded supervisor display name = %q, want %q", expandedSupervisorDisplayName, "hdt Supervisor")
+	}
+	if developerDisplayName != "agy Developer" {
+		t.Fatalf("developer display name = %q, want %q", developerDisplayName, "agy Developer")
+	}
+	if sidebarModeCompact.supervisorDisplayName() != "hdt" {
+		t.Fatalf("compact supervisor label = %q, want %q", sidebarModeCompact.supervisorDisplayName(), "hdt")
+	}
+	if sidebarModeCompact.developerDisplayName() != "hdt" {
+		t.Fatalf("compact developer label = %q, want %q", sidebarModeCompact.developerDisplayName(), "hdt")
+	}
+	if sidebarModeExpanded.supervisorDisplayName() != "hdt Supervisor" {
+		t.Fatalf("expanded supervisor label = %q, want %q", sidebarModeExpanded.supervisorDisplayName(), "hdt Supervisor")
+	}
+	if sidebarModeExpanded.developerDisplayName() != "agy Developer" {
+		t.Fatalf("expanded developer label = %q, want %q", sidebarModeExpanded.developerDisplayName(), "agy Developer")
 	}
 }
 

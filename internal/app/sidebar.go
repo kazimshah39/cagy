@@ -45,14 +45,14 @@ func (m sidebarMode) supervisorDisplayName() string {
 	if m == sidebarModeExpanded {
 		return expandedSupervisorDisplayName
 	}
-	return compactSupervisorDisplayName
+	return compactDisplayName
 }
 
 func (m sidebarMode) developerDisplayName() string {
 	if m == sidebarModeExpanded {
 		return developerDisplayName
 	}
-	return compactSupervisorDisplayName
+	return compactDisplayName
 }
 
 func (a *App) runtimeSidebarRecord(info runtimeContext) (runtimeRecord, sidebarMode, error) {

@@ -59,7 +59,8 @@ tar -czf "${SERVER_DIR}/archive.tar.gz" -C "${TEST_TMP}/src_stage" herdr-tandem-
 BIN_STAGE="${TEST_TMP}/bin_stage"
 mkdir -p "${BIN_STAGE}"
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -C "${REPO_ROOT}" -trimpath -ldflags "-s -w" -o "${BIN_STAGE}/herdr-tandem" ./cmd/herdr-tandem
-tar -czf "${SERVER_DIR}/${ARCHIVE_NAME}" -C "${BIN_STAGE}" herdr-tandem
+(cd "${BIN_STAGE}" && ln -sf herdr-tandem hdt)
+tar -czf "${SERVER_DIR}/${ARCHIVE_NAME}" -C "${BIN_STAGE}" herdr-tandem hdt
 
 if command -v sha256sum >/dev/null 2>&1; then
   REAL_SHA256="$(sha256sum "${SERVER_DIR}/${ARCHIVE_NAME}" | awk '{print $1}')"
@@ -97,7 +98,12 @@ if [ ! -x "${TARGET_LOCAL_SRC}/herdr-tandem" ]; then
   echo "FAILED: binary not installed at ${TARGET_LOCAL_SRC}/herdr-tandem" >&2
   exit 1
 fi
+if [ ! -L "${TARGET_LOCAL_SRC}/hdt" ] || [ ! -x "${TARGET_LOCAL_SRC}/hdt" ]; then
+  echo "FAILED: hdt alias symlink not installed at ${TARGET_LOCAL_SRC}/hdt" >&2
+  exit 1
+fi
 "${TARGET_LOCAL_SRC}/herdr-tandem" --help >/dev/null
+"${TARGET_LOCAL_SRC}/hdt" --help >/dev/null
 echo "✓ Test 1 passed (direct local execution used local tree)"
 
 # ----------------------------------------------------
@@ -124,6 +130,11 @@ if [ ! -x "${TARGET_PIPED_INSIDE_CLONE}/herdr-tandem" ]; then
   echo "FAILED: binary not installed via piped execution inside clone" >&2
   exit 1
 fi
+if [ ! -L "${TARGET_PIPED_INSIDE_CLONE}/hdt" ] || [ ! -x "${TARGET_PIPED_INSIDE_CLONE}/hdt" ]; then
+  echo "FAILED: hdt alias symlink not installed via piped execution inside clone" >&2
+  exit 1
+fi
+"${TARGET_PIPED_INSIDE_CLONE}/hdt" --help >/dev/null
 echo "✓ Test 2 passed (piped execution inside clone fetched remote source)"
 
 # ----------------------------------------------------
@@ -140,6 +151,11 @@ if [ ! -x "${TARGET_ENV_PIPE}/herdr-tandem" ]; then
   echo "FAILED: binary not installed to TARGET_ENV_PIPE via receiving bash env" >&2
   exit 1
 fi
+if [ ! -L "${TARGET_ENV_PIPE}/hdt" ] || [ ! -x "${TARGET_ENV_PIPE}/hdt" ]; then
+  echo "FAILED: hdt alias symlink not installed to TARGET_ENV_PIPE" >&2
+  exit 1
+fi
+"${TARGET_ENV_PIPE}/hdt" --help >/dev/null
 echo "✓ Test 3 passed (receiving bash process inherited HERDR_TANDEM_INSTALL_DIR)"
 
 # ----------------------------------------------------
@@ -178,15 +194,31 @@ if [ ! -x "${TARGET_BINARY}/herdr-tandem" ]; then
   echo "FAILED: binary not installed at ${TARGET_BINARY}/herdr-tandem" >&2
   exit 1
 fi
+if [ ! -L "${TARGET_BINARY}/hdt" ] || [ ! -x "${TARGET_BINARY}/hdt" ]; then
+  echo "FAILED: hdt alias symlink not installed at ${TARGET_BINARY}/hdt" >&2
+  exit 1
+fi
+"${TARGET_BINARY}/hdt" --help >/dev/null
 
-# Ensure no temporary files (.herdr-tandem.install.* or *.tmp) remain in destination dir
+# Test idempotent re-installation into existing destination directory
+HERDR_TANDEM_DOWNLOAD_BASE_URL="${BASE_URL}" "${REPO_ROOT}/install.sh" \
+  --dir "${TARGET_BINARY}" \
+  --version "v${VERSION}" \
+  --binary >/dev/null
+
+if [ ! -L "${TARGET_BINARY}/hdt" ] || [ ! -x "${TARGET_BINARY}/hdt" ]; then
+  echo "FAILED: hdt alias symlink broken after re-installation" >&2
+  exit 1
+fi
+
+# Ensure no temporary files (.herdr-tandem.install.* or *.tmp*) remain in destination dir
 LEFTOVER_COUNT=$(find "${TARGET_BINARY}" -type f -name ".herdr-tandem.install.*" -o -name "*.tmp*" | wc -l | tr -d ' ')
 if [ "$LEFTOVER_COUNT" -ne 0 ]; then
   echo "FAILED: leftover temporary files found in ${TARGET_BINARY}" >&2
   find "${TARGET_BINARY}" -type f
   exit 1
 fi
-echo "✓ Test 5 passed (installed cleanly with no temporary file leftovers)"
+echo "✓ Test 5 passed (installed cleanly with hdt alias and no temporary file leftovers)"
 
 # ----------------------------------------------------
 # Test 6: Checksum matching handles ambiguous filenames correctly
@@ -220,6 +252,11 @@ if [ ! -x "${TARGET_AMBIGUOUS}/herdr-tandem" ]; then
   echo "FAILED: ambiguous checksum matching failed to select the exact archive entry" >&2
   exit 1
 fi
+if [ ! -L "${TARGET_AMBIGUOUS}/hdt" ] || [ ! -x "${TARGET_AMBIGUOUS}/hdt" ]; then
+  echo "FAILED: hdt alias symlink not installed at ${TARGET_AMBIGUOUS}/hdt" >&2
+  exit 1
+fi
+"${TARGET_AMBIGUOUS}/hdt" --help >/dev/null
 echo "✓ Test 6 passed (exact archive name matched despite prefix/suffix entries)"
 
 # ----------------------------------------------------

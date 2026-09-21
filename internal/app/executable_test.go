@@ -74,3 +74,31 @@ func TestResolveExecutableRejectsInvalid(t *testing.T) {
 		t.Fatalf("expected resolver failure error, got: %v", err)
 	}
 }
+
+func TestResolveExecutableHDTAliasSymlink(t *testing.T) {
+	tempDir := t.TempDir()
+	canonicalBin := filepath.Join(tempDir, "herdr-tandem")
+	if err := os.WriteFile(canonicalBin, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	aliasSymlink := filepath.Join(tempDir, "hdt")
+	if err := os.Symlink("herdr-tandem", aliasSymlink); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalTarget, err := filepath.EvalSymlinks(canonicalBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveExecutable(func() (string, error) {
+		return aliasSymlink, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error resolving hdt alias: %v", err)
+	}
+	if resolved != canonicalTarget {
+		t.Fatalf("expected resolved path %q, got %q", canonicalTarget, resolved)
+	}
+}

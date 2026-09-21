@@ -16,11 +16,22 @@ Set `HERDR_TANDEM_PROVIDER_SERVICE_URL` only when the service uses another loopb
 
 ## Commands
 
+`herdr-tandem` is the canonical command. An `hdt` shorthand alias is installed alongside it.
+
 ```bash
 herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
 herdr-tandem --show-agents [--supervisor codex|opencode] [DIRECTORY]
 herdr-tandem doctor [--supervisor codex|opencode]
 herdr-tandem stop
+```
+
+Or using the `hdt` shorthand:
+
+```bash
+hdt [--supervisor codex|opencode] [DIRECTORY]
+hdt --show-agents [--supervisor codex|opencode] [DIRECTORY]
+hdt doctor [--supervisor codex|opencode]
+hdt stop
 ```
 
 Emergency task commands remain available through the same binary:
@@ -38,10 +49,10 @@ The default supervisor is Codex. OpenCode is selected explicitly with `--supervi
 The normal command starts a compact project:
 
 ```bash
-herdr-tandem
+herdr-tandem  # or: hdt
 ```
 
-Compact mode shows one real Herdr agent row named `herdr-tandem`:
+Compact mode shows one real Herdr agent row labeled `hdt`:
 
 - The supervisor is shown while no Tandem-managed developer task is active.
 - The developer becomes the visible row before delegated work starts, so Herdr shows its native working or blocked indicator.
@@ -50,10 +61,10 @@ Compact mode shows one real Herdr agent row named `herdr-tandem`:
 Expanded mode is selected per project:
 
 ```bash
-herdr-tandem --show-agents
+herdr-tandem --show-agents  # or: hdt --show-agents
 ```
 
-Expanded mode always shows `herdr-tandem Supervisor` and `agy Developer` as separate rows. Starting a compact project does not hide an expanded project's developer, and starting an expanded project does not expand other projects.
+Expanded mode always shows `hdt Supervisor` and `agy Developer` as separate rows. Starting a compact project does not hide an expanded project's developer, and starting an expanded project does not expand other projects.
 
 Compact switching covers work submitted through Herdr Tandem. Work typed manually in the developer pane does not switch the compact representative automatically. Use expanded mode when both native states must remain visible.
 

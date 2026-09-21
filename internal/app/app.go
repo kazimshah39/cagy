@@ -25,8 +25,8 @@ const (
 	paneOwnershipSource           = "herdr-tandem:pane-owner"
 	supervisorDisplaySource       = "herdr-tandem:supervisor-display"
 	developerDisplaySource        = "herdr-tandem:developer-display"
-	compactSupervisorDisplayName  = "herdr-tandem"
-	expandedSupervisorDisplayName = "herdr-tandem Supervisor"
+	compactDisplayName            = "hdt"
+	expandedSupervisorDisplayName = "hdt Supervisor"
 	developerDisplayName          = "agy Developer"
 	runtimeIDEnv                  = "HERDR_TANDEM_RUNTIME_ID"
 	supervisorKindEnv             = "HERDR_TANDEM_SUPERVISOR_KIND"
@@ -281,6 +281,9 @@ Usage:
   herdr-tandem --show-agents [--supervisor codex|opencode] [DIRECTORY]
   herdr-tandem doctor [--supervisor codex|opencode]
   herdr-tandem stop
+
+Shorthand alias:
+  hdt (optional shorthand for herdr-tandem)
 
 Emergency fallback command:
   herdr-tandem ask --stdin

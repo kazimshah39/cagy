@@ -15,6 +15,8 @@ import (
 
 type Agy struct{}
 
+const DefaultSupervisorModel = "claude-opus-4-6-thinking"
+
 func (Agy) ID() string          { return AgyID }
 func (Agy) DisplayName() string { return "agy" }
 func (Agy) Executable() string  { return "agy" }

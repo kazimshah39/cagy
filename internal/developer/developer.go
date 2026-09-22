@@ -9,7 +9,10 @@ import (
 	"github.com/kazimshah39/herdr-tandem/internal/herdr"
 )
 
-const AgyID = "agy"
+const (
+	AgyID                 = "agy"
+	DefaultDeveloperModel = "gemini-3.8-flash-high"
+)
 
 type StartOptions struct {
 	Name      string

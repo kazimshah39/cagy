@@ -49,6 +49,8 @@ func (r *doctorStopTestRunner) Run(_ context.Context, args ...string) (proc.Resu
 		return ok, nil
 	case joined == "agy --help":
 		return proc.Result{ExitCode: 0, Stdout: "--agent --model --mode --dangerously-skip-permissions accept-edits --conversation"}, nil
+	case joined == "agy models":
+		return proc.Result{ExitCode: 0, Stdout: "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\nclaude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n"}, nil
 	case joined == "herdr agent":
 		return proc.Result{ExitCode: 0, Stdout: "agent start agent prompt agent wait agy"}, nil
 	case joined == "herdr pane":

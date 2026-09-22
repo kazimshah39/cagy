@@ -43,6 +43,25 @@ Runtime records are stored per supervisor under:
 
 Version 4 records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, required `sidebar_mode`, optional `supervisor_model`, `developer_model`, and `supervisor_agent_name`, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
 
+## Model selection architecture
+
+Herdr Tandem defines Tandem-owned default model selection:
+
+- agy supervisor default: `claude-opus-4-6-thinking` (applied only when agy is the selected supervisor and `--supervisor-model` was not explicitly supplied)
+- agy developer default: `gemini-3.8-flash-high` (applied for all supervisors when `--developer-model` was not explicitly supplied)
+
+### Pinned versions policy
+
+Model versions are intentionally pinned constants in code rather than unpinned or automatic "latest" aliases. This preserves workflow reproducibility and avoids prompt format drift. Constants are updated in future releases after validation.
+
+### Capability preflight & doctor validation
+
+- Fail-fast preflight uses `agy models` (not a model turn) to verify exact tabular model IDs before pane creation or agent execution.
+- Single invocation: when both supervisor and developer use agy, model list validation is executed only once per invocation via internal caching.
+- Diagnostics privacy: model values, full command output, credentials, instructions, and task text are never logged to diagnostics.
+- Runtime records persist effective models; developer repair and exact resume retain the stored model.
+- Doctor validates the effective agy models without mutation or model turn.
+
 ## Sidebar architecture
 
 Herdr exposes one transient Agent view per server, so Herdr Tandem installs one stable projection while any Tandem runtime exists. The projection hides only rows whose `herdr_tandem_sidebar_visibility` token is exactly `hidden`; rows without that token remain visible. Final cleanup is source-guarded and occurs under the runtime-state lock only after the last runtime record is removed.

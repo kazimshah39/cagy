@@ -41,7 +41,35 @@ herdr-tandem ask --forget
 ```
 
 The default supervisor is Codex. OpenCode is selected explicitly with `--supervisor opencode`, and agy is selected with `--supervisor agy`.
-Role-specific models may be configured using `--supervisor-model <model>` (supported only with `--supervisor agy`) and `--developer-model <model>` (supported with any supervisor).
+
+## Model selection
+
+Herdr Tandem defines Tandem-owned default model selections:
+
+- **agy supervisor default:** `claude-opus-4-6-thinking` (applied when agy is the selected supervisor and `--supervisor-model` is not explicitly supplied)
+- **agy developer default:** `gemini-3.8-flash-high` (applied for all supervisors when `--developer-model` is not explicitly supplied)
+
+### Model overrides
+
+Explicit CLI model flags always override the defaults:
+
+- `--supervisor-model <model>`: overrides the agy supervisor model (supported only when `--supervisor agy` is selected).
+- `--developer-model <model>`: overrides the agy developer model (supported with any supervisor).
+- Explicit CLI flags always win, including explicitly passing a default model value.
+- Codex and OpenCode supervisors do not receive a supervisor model default or flag; their launch arguments and environment remain supervisor-native.
+
+### Version pinning policy
+
+Herdr Tandem intentionally pins explicit model versions in code constants (`claude-opus-4-6-thinking` and `gemini-3.8-flash-high`) rather than relying on floating or automatic "latest" aliases. This policy ensures:
+
+- **Reproducibility:** Pair-programming workflows and tool-calling behaviors behave consistently across runs without unannounced upstream changes or prompt format drift.
+- **Validation before upgrade:** Each pinned version is tested and validated against Tandem's MCP bridge and agy's edit modes before adoption. Future releases of Herdr Tandem update these constants after testing.
+
+### Capability preflight & doctor validation
+
+- **Start preflight:** Before creating panes or starting agents, `herdr-tandem` performs a fail-fast capability check using `agy models` (verifying exact tabular model IDs without initiating a model turn or consuming quota). When both supervisor and developer use agy, model list validation is executed only once per invocation.
+- **Doctor check:** `herdr-tandem doctor` validates that the effective developer model is available, and if `--supervisor agy` is selected, also validates that the effective supervisor model is available.
+- **Runtime persistence & repair:** The effective models are persisted in the runtime record and retained during developer repair and exact session resumption.
 
 ## Sidebar modes
 

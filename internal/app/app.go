@@ -89,6 +89,9 @@ type App struct {
 	supervisorModel         string
 	developerModel          string
 	configRoot              string
+	availableAgyModels      map[string]struct{}
+	availableAgyModelsErr   error
+	agyModelsChecked        bool
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
@@ -165,7 +168,19 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 	}()
 
 	if len(args) == 0 {
-		return a.start(ctx, ".", sidebarModeCompact)
+		path, mode, supervisorID, supervisorModel, developerModel, err := parseStartArgs(nil)
+		if err != nil {
+			return err
+		}
+		if supervisorID != "" {
+			a.supervisor, err = supervisor.DefaultRegistry().Resolve(supervisorID)
+			if err != nil {
+				return err
+			}
+		}
+		a.supervisorModel = supervisorModel
+		a.developerModel = developerModel
+		return a.start(ctx, path, mode)
 	}
 
 	switch args[0] {
@@ -324,6 +339,8 @@ func parseStartArgs(args []string) (string, sidebarMode, string, string, string,
 		if effectiveSupervisor != supervisor.AgyID {
 			return "", "", "", "", "", fmt.Errorf("--supervisor-model is only supported with %s supervisor", supervisor.AgyID)
 		}
+	} else if supervisorID == supervisor.AgyID {
+		supervisorModel = DefaultAgySupervisorModel
 	}
 
 	if developerModelSet {
@@ -333,6 +350,8 @@ func parseStartArgs(args []string) (string, sidebarMode, string, string, string,
 		if err := validateModelName(developerModel); err != nil {
 			return "", "", "", "", "", fmt.Errorf("%s: %w", startUsage, err)
 		}
+	} else {
+		developerModel = DefaultAgyDeveloperModel
 	}
 
 	return path, mode, supervisorID, supervisorModel, developerModel, nil

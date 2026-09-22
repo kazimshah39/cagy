@@ -41,6 +41,9 @@ func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr 
 			return err
 		}
 	}
+	if err := a.validateModelCapabilities(ctx); err != nil {
+		return err
+	}
 	if strings.TrimSpace(a.getenv("HERDR_SOCKET_PATH")) == "" {
 		return fmt.Errorf("herdr socket path is missing")
 	}
@@ -315,10 +318,32 @@ func (a *App) doctor(ctx context.Context) error {
 			project = p
 		}
 	}
+	devModel := a.developerModel
+	supModel := a.supervisorModel
 	if workspaceID != "" && paneID != "" && project != "" {
-		if record, found, err := a.runtimeManager().FindForSupervisorPane(workspaceID, paneID, project); err == nil && found && record.SupervisorAgentName != "" {
-			check("supervisor custom agent", a.validateSupervisorArtifact(record))
+		if record, found, err := a.runtimeManager().FindForSupervisorPane(workspaceID, paneID, project); err == nil && found {
+			if devModel == "" {
+				devModel = record.DeveloperModel
+			}
+			if supModel == "" {
+				supModel = record.SupervisorModel
+			}
+			if record.SupervisorAgentName != "" {
+				check("supervisor custom agent", a.validateSupervisorArtifact(record))
+			}
 		}
+	}
+	if devModel == "" {
+		devModel = DefaultAgyDeveloperModel
+	}
+	if supModel == "" && a.supervisor.ID() == supervisor.AgyID {
+		supModel = DefaultAgySupervisorModel
+	}
+	if a.supervisor.ID() == supervisor.AgyID {
+		check("agy supervisor model capability", a.checkAgyModel(ctx, "supervisor", supModel))
+	}
+	if a.developerAdapter.ID() == dev.AgyID {
+		check("agy developer model capability", a.checkAgyModel(ctx, "developer", devModel))
 	}
 	if a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID") != "" && a.getenv("HERDR_TANDEM_PROJECT_DIR") != "" {
 		check("herdr-tandem session", a.checkSessionHealth(ctx))

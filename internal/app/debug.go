@@ -41,6 +41,14 @@ func (a *App) debugf(format string, args ...any) {
 		}
 	}
 	message := fmt.Sprintf(format, args...)
+	if a.supervisorModel != "" {
+		message = strings.ReplaceAll(message, a.supervisorModel, "[REDACTED_MODEL]")
+	}
+	if a.developerModel != "" {
+		message = strings.ReplaceAll(message, a.developerModel, "[REDACTED_MODEL]")
+	}
+	message = strings.ReplaceAll(message, DefaultAgySupervisorModel, "[REDACTED_MODEL]")
+	message = strings.ReplaceAll(message, DefaultAgyDeveloperModel, "[REDACTED_MODEL]")
 	if a.diagnosticSink != nil {
 		a.diagnosticSink(redactDiagnostic(message))
 	}

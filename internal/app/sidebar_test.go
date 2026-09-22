@@ -20,12 +20,15 @@ func TestSidebarModeParsingAndLabels(t *testing.T) {
 		}
 	}
 	compact, err := parseSidebarMode(" compact ")
-	if err != nil || compact.supervisorDisplayName() != "hdt" || compact.developerDisplayName() != "hdt" {
+	if err != nil || compact.supervisorDisplayName("codex") != "hdt" || compact.developerDisplayName() != "hdt" {
 		t.Fatalf("compact=%q err=%v", compact, err)
 	}
 	expanded, err := parseSidebarMode("expanded")
-	if err != nil || expanded.supervisorDisplayName() != "hdt Supervisor" || expanded.developerDisplayName() != "agy Developer" {
+	if err != nil || expanded.supervisorDisplayName("codex") != "hdt Supervisor" || expanded.developerDisplayName() != "agy Developer" {
 		t.Fatalf("expanded=%q err=%v", expanded, err)
+	}
+	if expanded.supervisorDisplayName("agy") != "agy Supervisor" {
+		t.Fatalf("expanded agy supervisor = %q, want agy Supervisor", expanded.supervisorDisplayName("agy"))
 	}
 }
 
@@ -36,17 +39,29 @@ func TestSidebarDisplayLabels(t *testing.T) {
 	if expandedSupervisorDisplayName != "hdt Supervisor" {
 		t.Fatalf("expanded supervisor display name = %q, want %q", expandedSupervisorDisplayName, "hdt Supervisor")
 	}
+	if expandedAgySupervisorDisplayName != "agy Supervisor" {
+		t.Fatalf("expanded agy supervisor display name = %q, want %q", expandedAgySupervisorDisplayName, "agy Supervisor")
+	}
 	if developerDisplayName != "agy Developer" {
 		t.Fatalf("developer display name = %q, want %q", developerDisplayName, "agy Developer")
 	}
-	if sidebarModeCompact.supervisorDisplayName() != "hdt" {
-		t.Fatalf("compact supervisor label = %q, want %q", sidebarModeCompact.supervisorDisplayName(), "hdt")
+	if sidebarModeCompact.supervisorDisplayName("codex") != "hdt" {
+		t.Fatalf("compact codex supervisor label = %q, want %q", sidebarModeCompact.supervisorDisplayName("codex"), "hdt")
+	}
+	if sidebarModeCompact.supervisorDisplayName("agy") != "hdt" {
+		t.Fatalf("compact agy supervisor label = %q, want %q", sidebarModeCompact.supervisorDisplayName("agy"), "hdt")
 	}
 	if sidebarModeCompact.developerDisplayName() != "hdt" {
 		t.Fatalf("compact developer label = %q, want %q", sidebarModeCompact.developerDisplayName(), "hdt")
 	}
-	if sidebarModeExpanded.supervisorDisplayName() != "hdt Supervisor" {
-		t.Fatalf("expanded supervisor label = %q, want %q", sidebarModeExpanded.supervisorDisplayName(), "hdt Supervisor")
+	if sidebarModeExpanded.supervisorDisplayName("codex") != "hdt Supervisor" {
+		t.Fatalf("expanded codex supervisor label = %q, want %q", sidebarModeExpanded.supervisorDisplayName("codex"), "hdt Supervisor")
+	}
+	if sidebarModeExpanded.supervisorDisplayName("opencode") != "hdt Supervisor" {
+		t.Fatalf("expanded opencode supervisor label = %q, want %q", sidebarModeExpanded.supervisorDisplayName("opencode"), "hdt Supervisor")
+	}
+	if sidebarModeExpanded.supervisorDisplayName("agy") != "agy Supervisor" {
+		t.Fatalf("expanded agy supervisor label = %q, want %q", sidebarModeExpanded.supervisorDisplayName("agy"), "agy Supervisor")
 	}
 	if sidebarModeExpanded.developerDisplayName() != "agy Developer" {
 		t.Fatalf("expanded developer label = %q, want %q", sidebarModeExpanded.developerDisplayName(), "agy Developer")
@@ -236,7 +251,7 @@ func (r readOnlySidebarRunner) Run(_ context.Context, args ...string) (proc.Resu
 		return proc.Result{}, fmt.Errorf("unexpected read-only status call: %s", joined)
 	}
 }
-func (readOnlySidebarRunner) RunAttached([]string, []string) error { return nil }
+func (readOnlySidebarRunner) RunAttached(string, []string, []string) error { return nil }
 
 func TestTaskAndDeveloperStatusRemainSidebarReadOnly(t *testing.T) {
 	project, err := resolveProject(t.TempDir())

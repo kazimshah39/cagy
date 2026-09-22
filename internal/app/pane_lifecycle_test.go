@@ -25,7 +25,7 @@ func (r *paneLifecycleRunner) Run(_ context.Context, args ...string) (proc.Resul
 	}
 	return proc.Result{}, fmt.Errorf("unexpected call: %s", strings.Join(args, " "))
 }
-func (r *paneLifecycleRunner) RunAttached([]string, []string) error { return nil }
+func (r *paneLifecycleRunner) RunAttached(string, []string, []string) error { return nil }
 
 func TestEnsureDeveloperReadyReturnsImmediatelyWhenAlreadyReady(t *testing.T) {
 	runner := &paneLifecycleRunner{

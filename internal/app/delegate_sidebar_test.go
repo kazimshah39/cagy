@@ -52,7 +52,7 @@ func (r *delegateSidebarRunner) Run(_ context.Context, args ...string) (proc.Res
 		return proc.Result{}, fmt.Errorf("unexpected delegate call: %s", joined)
 	}
 }
-func (r *delegateSidebarRunner) RunAttached([]string, []string) error { return nil }
+func (r *delegateSidebarRunner) RunAttached(string, []string, []string) error { return nil }
 
 func (r *delegateSidebarRunner) writeCompletedTranscript() error {
 	paths, err := transcript.PathsFor(r.transcriptRoot, transcript.Ref{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: r.conversationID})

@@ -31,6 +31,8 @@ type startupSidebarRunner struct {
 	developerPane  string
 	developerName  string
 	calls          [][]string
+	attachedDir    string
+	attachedArgs   []string
 	attachedEnv    []string
 }
 
@@ -62,11 +64,15 @@ func (r *startupSidebarRunner) Run(_ context.Context, args ...string) (proc.Resu
 		return proc.Result{ExitCode: 0, Stdout: "--yolo"}, nil
 	case joined == "codex mcp --help":
 		return proc.Result{ExitCode: 0, Stdout: "list"}, nil
+	case joined == "agy --help":
+		return proc.Result{ExitCode: 0, Stdout: "--agent --model --mode --dangerously-skip-permissions accept-edits --conversation"}, nil
 	default:
 		return proc.Result{}, errors.New("unexpected startup call: " + joined)
 	}
 }
-func (r *startupSidebarRunner) RunAttached(args []string, env []string) error {
+func (r *startupSidebarRunner) RunAttached(dir string, args []string, env []string) error {
+	r.attachedDir = dir
+	r.attachedArgs = append([]string(nil), args...)
 	r.attachedEnv = append([]string(nil), env...)
 	return nil
 }
@@ -131,7 +137,7 @@ func TestSidebarStartupKeepsCompactAndExpandedProjectsIndependentInBothOrders(t 
 				if visibility[supervisorPane] != herdr.PaneVisible || visibility[developerPane] != wantDeveloper {
 					t.Fatalf("mode=%q supervisor=%q developer=%q", mode, visibility[supervisorPane], visibility[developerPane])
 				}
-				wantSupervisorLabel := mode.supervisorDisplayName()
+				wantSupervisorLabel := mode.supervisorDisplayName(app.supervisor.ID())
 				wantDeveloperLabel := mode.developerDisplayName()
 				if !runner.hasDisplayLabel(supervisorPane, wantSupervisorLabel) || !runner.hasDisplayLabel(developerPane, wantDeveloperLabel) {
 					t.Fatalf("mode=%q calls=%v", mode, runner.calls)
@@ -527,5 +533,68 @@ func TestManualDeveloperWorkCannotSwitchCompactRepresentativeAutomatically(t *te
 		if !reflect.DeepEqual(visibilityLog, expandedWant) {
 			t.Fatalf("expanded visibilityLog = %v, want %v", visibilityLog, expandedWant)
 		}
+	}
+}
+
+func TestSidebarExpandedModeWithAgySupervisorLabelsAgySupervisor(t *testing.T) {
+	project, err := resolveProject(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisorPane := "w1:p1"
+	developerPane := "w1:p2"
+	runner := &startupSidebarRunner{
+		project:        project,
+		supervisorPane: supervisorPane,
+		developerPane:  developerPane,
+		developerName:  developerName("w1", supervisorPane),
+	}
+	app := New(runner, io.Discard, io.Discard)
+	app.supervisor = supervisor.Agy{}
+	app.stateDir = t.TempDir()
+	app.configRoot = t.TempDir()
+	app.token = func() (string, error) { return "test-token-expanded-agy", nil }
+	app.checkPlatform = func() error { return nil }
+	app.resolveExecutable = func() (string, error) { return "/tmp/herdr-tandem", nil }
+	app.providerServiceCheck = func(context.Context) error { return nil }
+	app.runningBuild = func() buildmeta.Identity { return buildmeta.Identity{} }
+	app.getenv = func(key string) string {
+		switch key {
+		case "HERDR_ENV":
+			return "1"
+		case "HERDR_WORKSPACE_ID":
+			return "w1"
+		case "HERDR_PANE_ID":
+			return supervisorPane
+		case "HERDR_SOCKET_PATH":
+			return "/tmp/herdr.sock"
+		}
+		return ""
+	}
+	app.environ = func() []string { return nil }
+	visibility := map[string]herdr.PaneVisibility{}
+	app.reportSidebarVisibility = func(_ context.Context, pane string, value herdr.PaneVisibility) error {
+		visibility[pane] = value
+		return nil
+	}
+	app.setSidebarView = func(context.Context) error { return nil }
+
+	args := []string{"--expanded", "--supervisor", "agy", project}
+	if err := app.Run(context.Background(), args); err != nil {
+		t.Fatalf("Run(%v) error: %v", args, err)
+	}
+
+	// In expanded mode with agy supervisor, labels must distinguish agy Supervisor and agy Developer
+	if !runner.hasDisplayLabel(supervisorPane, "agy Supervisor") {
+		t.Fatalf("supervisor missing expanded label 'agy Supervisor' in calls: %v", runner.calls)
+	}
+	if !runner.hasDisplayLabel(developerPane, "agy Developer") {
+		t.Fatalf("developer missing expanded label 'agy Developer' in calls: %v", runner.calls)
+	}
+
+	// Check runtime record stores "expanded" and "agy"
+	record, exists, err := app.runtimeManager().FindForScope(runtimeContext{supervisorKind: supervisor.AgyID, developerKind: "agy", workspaceID: "w1", supervisor: supervisorPane, developer: runner.developerName, project: project})
+	if err != nil || !exists || record.SidebarMode != string(sidebarModeExpanded) || record.SupervisorKind != supervisor.AgyID {
+		t.Fatalf("record=%+v exists=%t err=%v", record, exists, err)
 	}
 }

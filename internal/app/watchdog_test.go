@@ -99,7 +99,7 @@ func (watchdogSidebarRunner) Run(_ context.Context, args ...string) (proc.Result
 	}
 	return proc.Result{}, fmt.Errorf("unexpected watchdog call: %s", joined)
 }
-func (watchdogSidebarRunner) RunAttached([]string, []string) error { return nil }
+func (watchdogSidebarRunner) RunAttached(string, []string, []string) error { return nil }
 
 func TestWatchdogPollingDoesNotWriteSidebarMetadata(t *testing.T) {
 	app := New(watchdogSidebarRunner{}, io.Discard, io.Discard)

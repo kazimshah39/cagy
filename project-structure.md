@@ -5,14 +5,14 @@
 
 ## Purpose
 
-Herdr Tandem creates one supervisor and one `agy` developer in Herdr for each project. The supervisor can be Codex or OpenCode. The developer is currently agy. Each runtime chooses compact or expanded sidebar presentation independently.
+Herdr Tandem creates one supervisor and one `agy` developer in Herdr for each project. The supervisor can be Codex, OpenCode, or agy (Codex default). The developer is currently agy. Each runtime chooses compact or expanded sidebar presentation independently.
 
 Herdr owns panes and agent lifecycle. Herdr Tandem owns project-scoped workflow orchestration, pane ownership checks, task journals, transcript delivery, and the local stdio MCP bridge.
 
 ## Adapter model
 
 ```text
-Supervisor adapter: Codex or OpenCode
+Supervisor adapter: Codex, OpenCode, or agy
              │
              ├── shared Herdr Tandem MCP bridge
              │
@@ -21,7 +21,7 @@ Developer adapter: agy
              └── Herdr antigravity-cli transcript/session integration
 ```
 
-`internal/supervisor` contains launch contracts, registry, Codex, and OpenCode adapters. `internal/developer` contains the developer contract and the agy profile. `internal/app` remains the shared lifecycle and task engine.
+`internal/supervisor` contains launch contracts, registry, Codex, OpenCode, and agy adapters. When agy is selected as the supervisor, it uses a runtime-scoped custom agent (`~/.gemini/config/agents/herdr-tandem-<runtime-id>/agent.md`) with private `0700` directory and `0600` file permissions to provide the stdio MCP bridge and supervisor instructions without persistent global configuration; this artifact is unconditionally cleaned up when the supervisor exits or is stopped. `internal/developer` contains the developer contract and the agy profile. `internal/app` remains the shared lifecycle and task engine.
 
 ## Developer readiness
 
@@ -41,7 +41,7 @@ Runtime records are stored per supervisor under:
 ~/Library/Application Support/herdr-tandem/state/runtimes/<runtime-id>.json
 ```
 
-Version 4 records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, required `sidebar_mode`, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
+Version 4 records contain the supervisor/developer profile IDs, Herdr scope, project, pane IDs, required `sidebar_mode`, optional `supervisor_model`, `developer_model`, and `supervisor_agent_name`, timestamps, and build revision. A duplicate start from the same supervisor pane is rejected; different panes and projects may run concurrently.
 
 ## Sidebar architecture
 
@@ -50,7 +50,7 @@ Herdr exposes one transient Agent view per server, so Herdr Tandem installs one 
 Each runtime stores `sidebar_mode` as `compact` or `expanded`:
 
 - Compact mode is the default and shows one real agent row labeled `hdt`. It shows the supervisor at rest and the developer during a Tandem-managed submitting, working, blocked, or unresolved task.
-- Expanded mode is an explicit opt-in (`--expanded`) that keeps both owned panes visible with distinct labels (`hdt Supervisor` and `agy Developer`), ensuring manual work in the developer pane remains visible even when the supervisor is idle or stopped.
+- Expanded mode is an explicit opt-in (`--expanded`) that keeps both owned panes visible with distinct labels (`hdt Supervisor` or `agy Supervisor` when agy is the supervisor, and `agy Developer`), ensuring manual work in the developer pane remains visible even when the supervisor is idle or stopped.
 - Compact transitions show the destination before hiding the previous row. A partial failure can temporarily show both rows but must not intentionally hide both.
 - Recovery and repair use the persisted mode after validating workspace, tab, project, owner, role, runtime, and environment agreement.
 - `task_status` and `developer_status` are read-only. Watchdog polling never writes sidebar metadata.
@@ -62,8 +62,8 @@ Herdr Tandem does not synthesize a combined agent or override native Herdr statu
 `herdr-tandem` is the canonical command; `hdt` is available alongside it as a shorthand alias.
 
 ```text
-herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]
-herdr-tandem doctor [--supervisor codex|opencode]
+herdr-tandem [--expanded] [--supervisor codex|opencode|agy] [--supervisor-model <model>] [--developer-model <model>] [DIRECTORY]
+herdr-tandem doctor [--supervisor codex|opencode|agy]
 herdr-tandem stop
 herdr-tandem mcp-server       # internal stdio bridge
 herdr-tandem ask --stdin      # emergency fallback
@@ -71,8 +71,8 @@ herdr-tandem ask --recover
 herdr-tandem ask --forget
 
 # Shorthand alias:
-hdt [--expanded] [--supervisor codex|opencode] [DIRECTORY]
-hdt doctor [--supervisor codex|opencode]
+hdt [--expanded] [--supervisor codex|opencode|agy] [--supervisor-model <model>] [--developer-model <model>] [DIRECTORY]
+hdt doctor [--supervisor codex|opencode|agy]
 hdt stop
 ```
 

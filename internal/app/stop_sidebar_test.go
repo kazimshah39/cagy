@@ -48,7 +48,7 @@ func (r *stopSidebarRunner) Run(_ context.Context, args ...string) (proc.Result,
 		return proc.Result{}, fmt.Errorf("unexpected stop call: %s", joined)
 	}
 }
-func (r *stopSidebarRunner) RunAttached([]string, []string) error { return nil }
+func (r *stopSidebarRunner) RunAttached(string, []string, []string) error { return nil }
 
 func TestStopRestoresCompactSupervisorBeforeDeveloperShutdownAndClearsLastView(t *testing.T) {
 	project, err := resolveProject(t.TempDir())

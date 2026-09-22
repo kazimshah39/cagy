@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -266,5 +267,109 @@ func TestRuntimeConcurrentLastStopSerializesWithNewStart(t *testing.T) {
 	}
 	if _, exists, err := manager.loadByIDUnlocked("new"); err != nil || !exists {
 		t.Fatalf("new runtime exists=%t err=%v", exists, err)
+	}
+}
+
+func TestRuntimeRecordSupportsAgySupervisorAndModelFields(t *testing.T) {
+	record := runtimeTestRecord(t, "agy-sup-1", "w1:p1")
+	record.SupervisorKind = "agy"
+	record.SupervisorModel = "gemini-2.5-pro"
+	record.DeveloperModel = "gemini-2.5-flash"
+	record.SupervisorAgentName = "herdr-tandem-agy-sup-1"
+	record.Version = runtimeRecordVersion
+	record.CreatedAt = testRuntimeTime()
+	record.UpdatedAt = record.CreatedAt
+
+	if err := validateRuntimeRecord(record); err != nil {
+		t.Fatalf("valid agy supervisor record rejected: %v", err)
+	}
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeRuntimeRecord(data)
+	if err != nil {
+		t.Fatalf("decodeRuntimeRecord failed: %v", err)
+	}
+	if decoded.SupervisorKind != "agy" || decoded.SupervisorModel != "gemini-2.5-pro" || decoded.DeveloperModel != "gemini-2.5-flash" || decoded.SupervisorAgentName != "herdr-tandem-agy-sup-1" {
+		t.Fatalf("decoded mismatch: %+v", decoded)
+	}
+}
+
+func TestRuntimeRecordDecodeLegacyRecord(t *testing.T) {
+	// A version 4 record without model or agent name fields must decode cleanly
+	legacyJSON := `{"version":4,"supervisor_kind":"codex","developer_kind":"agy","runtime_id":"legacy-1","sidebar_mode":"compact","workspace_id":"w1","supervisor_pane_id":"p1","developer":"dev-1","project":"/tmp/test","created_at":"2026-09-21T00:00:00Z","updated_at":"2026-09-21T00:00:00Z"}`
+	decoded, err := decodeRuntimeRecord([]byte(legacyJSON))
+	if err != nil {
+		t.Fatalf("legacy record failed to decode: %v", err)
+	}
+	if decoded.SupervisorModel != "" || decoded.DeveloperModel != "" || decoded.SupervisorAgentName != "" {
+		t.Fatalf("unexpected fields populated on legacy record: %+v", decoded)
+	}
+}
+
+func TestRuntimeRecordValidationFailsOnInvalidModelAndAgentName(t *testing.T) {
+	record := runtimeTestRecord(t, "bad-fields-1", "w1:p1")
+	record.SupervisorKind = "agy"
+	record.Version = runtimeRecordVersion
+	record.CreatedAt = testRuntimeTime()
+	record.UpdatedAt = record.CreatedAt
+
+	// Leading dash in model
+	record.SupervisorModel = "-bad-model"
+	if err := validateRuntimeRecord(record); err == nil {
+		t.Fatal("leading dash in model accepted")
+	}
+	record.SupervisorModel = "valid-model"
+
+	// Whitespace in model
+	record.DeveloperModel = "model with spaces"
+	if err := validateRuntimeRecord(record); err == nil {
+		t.Fatal("model with spaces accepted")
+	}
+	record.DeveloperModel = "valid-dev-model"
+
+	// Non-matching agent name
+	record.SupervisorAgentName = "herdr-tandem-different-id"
+	if err := validateRuntimeRecord(record); err == nil {
+		t.Fatal("non-matching agent name accepted")
+	}
+	record.SupervisorAgentName = "herdr-tandem-bad-fields-1"
+
+	// SupervisorModel on codex
+	codexRecord := record
+	codexRecord.SupervisorKind = "codex"
+	if err := validateRuntimeRecord(codexRecord); err == nil {
+		t.Fatal("supervisor model on codex accepted")
+	}
+}
+
+func TestRuntimeManagerFindForSupervisorPane(t *testing.T) {
+	manager := runtimeRecordManager{stateDir: t.TempDir()}
+	r1 := runtimeTestRecord(t, "rt-1", "w1:p1")
+	r1.SupervisorKind = "agy"
+	if _, err := manager.Prepare(context.Background(), r1); err != nil {
+		t.Fatal(err)
+	}
+	r2 := runtimeTestRecord(t, "rt-2", "w1:p2")
+	r2.SupervisorKind = "codex"
+	if _, err := manager.Prepare(context.Background(), r2); err != nil {
+		t.Fatal(err)
+	}
+
+	found, exists, err := manager.FindForSupervisorPane("w1", "w1:p1", r1.Project)
+	if err != nil || !exists || found.RuntimeID != "rt-1" {
+		t.Fatalf("FindForSupervisorPane failed: found=%+v exists=%t err=%v", found, exists, err)
+	}
+
+	found2, exists2, err := manager.FindForSupervisorPane("w1", "w1:p2", r2.Project)
+	if err != nil || !exists2 || found2.RuntimeID != "rt-2" {
+		t.Fatalf("FindForSupervisorPane failed: found=%+v exists=%t err=%v", found2, exists2, err)
+	}
+
+	_, exists3, err := manager.FindForSupervisorPane("w1", "w1:nonexistent", r1.Project)
+	if err != nil || exists3 {
+		t.Fatalf("expected not found: exists=%t err=%v", exists3, err)
 	}
 }

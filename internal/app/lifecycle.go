@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	dev "github.com/kazimshah39/herdr-tandem/internal/developer"
 	"github.com/kazimshah39/herdr-tandem/internal/herdr"
 )
 
@@ -497,7 +498,7 @@ func (a *App) repairMissingDeveloper(ctx context.Context, info runtimeContext) (
 	var developer herdr.AgentInfo
 	// Repair uses agy's current session directly. It must not touch the
 	// external credential stores; herdr-tandem never changes provider credentials.
-	startSpec, specErr := a.developerAdapter.StartSpec(info.developer, pane.PaneID, sessionID)
+	startSpec, specErr := a.developerAdapter.StartSpec(dev.StartOptions{Name: info.developer, PaneID: pane.PaneID, SessionID: sessionID, Model: runtimeLease.DeveloperModel})
 	if specErr != nil {
 		err = specErr
 	} else {

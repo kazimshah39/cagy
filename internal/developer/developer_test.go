@@ -14,7 +14,7 @@ func TestResolveAgyAndRejectUnknownDeveloper(t *testing.T) {
 
 func TestAgyStartSpecUsesRequiredFlagsAndExactSession(t *testing.T) {
 	adapter := Agy{}
-	fresh, err := adapter.StartSpec("dev", "w1:p2", "")
+	fresh, err := adapter.StartSpec(StartOptions{Name: "dev", PaneID: "w1:p2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,28 @@ func TestAgyStartSpecUsesRequiredFlagsAndExactSession(t *testing.T) {
 			t.Fatalf("fresh args=%#v missing %q", fresh.Args, want)
 		}
 	}
-	resumed, err := adapter.StartSpec("dev", "w1:p2", "session-123")
+	for _, arg := range fresh.Args {
+		if arg == "--model" {
+			t.Fatalf("fresh args unexpectedly contained --model: %#v", fresh.Args)
+		}
+	}
+
+	freshWithModel, err := adapter.StartSpec(StartOptions{Name: "dev", PaneID: "w1:p2", Model: "gemini-2.5-flash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasModel := false
+	for i, arg := range freshWithModel.Args {
+		if arg == "--model" && i+1 < len(freshWithModel.Args) && freshWithModel.Args[i+1] == "gemini-2.5-flash" {
+			hasModel = true
+			break
+		}
+	}
+	if !hasModel {
+		t.Fatalf("fresh with model missing --model flag: %#v", freshWithModel.Args)
+	}
+
+	resumed, err := adapter.StartSpec(StartOptions{Name: "dev", PaneID: "w1:p2", SessionID: "session-123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,5 +63,23 @@ func TestAgyStartSpecUsesRequiredFlagsAndExactSession(t *testing.T) {
 	}
 	if len(resumed.Args) < 2 || resumed.Args[0] != "--conversation" || resumed.Args[1] != "session-123" {
 		t.Fatalf("args=%#v", resumed.Args)
+	}
+
+	resumedWithModel, err := adapter.StartSpec(StartOptions{Name: "dev", PaneID: "w1:p2", SessionID: "session-123", Model: "gemini-2.5-pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resumedWithModel.Args) < 2 || resumedWithModel.Args[0] != "--conversation" || resumedWithModel.Args[1] != "session-123" {
+		t.Fatalf("resumed with model missing conversation-first: %#v", resumedWithModel.Args)
+	}
+	hasResumedModel := false
+	for i, arg := range resumedWithModel.Args {
+		if arg == "--model" && i+1 < len(resumedWithModel.Args) && resumedWithModel.Args[i+1] == "gemini-2.5-pro" {
+			hasResumedModel = true
+			break
+		}
+	}
+	if !hasResumedModel {
+		t.Fatalf("resumed with model missing --model flag: %#v", resumedWithModel.Args)
 	}
 }

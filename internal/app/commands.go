@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	dev "github.com/kazimshah39/herdr-tandem/internal/developer"
 	"github.com/kazimshah39/herdr-tandem/internal/herdr"
 	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
 )
@@ -65,7 +68,18 @@ func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr 
 	if a.runningBuild != nil {
 		buildRevision = a.runningBuild().Fingerprint()
 	}
-	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{BuildRevision: buildRevision, SidebarMode: string(mode), SupervisorKind: a.supervisor.ID(), DeveloperKind: a.developerAdapter.ID(), WorkspaceID: workspaceID, SupervisorPaneID: current.PaneID, Developer: developerName, Project: project})
+	prepared, err := a.runtimeManager().Prepare(ctx, runtimeRecord{
+		BuildRevision:    buildRevision,
+		SidebarMode:      string(mode),
+		SupervisorKind:   a.supervisor.ID(),
+		DeveloperKind:    a.developerAdapter.ID(),
+		WorkspaceID:      workspaceID,
+		SupervisorPaneID: current.PaneID,
+		Developer:        developerName,
+		Project:          project,
+		SupervisorModel:  a.supervisorModel,
+		DeveloperModel:   a.developerModel,
+	})
 	if err != nil {
 		return err
 	}
@@ -85,7 +99,7 @@ func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr 
 	if err := a.setPaneSidebarVisibility(ctx, current.PaneID, herdr.PaneVisible); err != nil {
 		return fmt.Errorf("show herdr-tandem supervisor: %w", err)
 	}
-	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, a.supervisor.ID(), mode.supervisorDisplayName()); err != nil {
+	if err := a.herdr.ReportAgentDisplay(ctx, current.PaneID, supervisorDisplaySource, a.supervisor.ID(), mode.supervisorDisplayName(a.supervisor.ID())); err != nil {
 		return fmt.Errorf("label herdr-tandem supervisor: %w", err)
 	}
 	if err := a.setSidebarView(ctx); err != nil {
@@ -131,7 +145,7 @@ func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr 
 			_ = a.confirmClosePane(ctx, pane.PaneID)
 			return err
 		}
-		startSpec, specErr := a.developerAdapter.StartSpec(developerName, pane.PaneID, "")
+		startSpec, specErr := a.developerAdapter.StartSpec(dev.StartOptions{Name: developerName, PaneID: pane.PaneID, Model: a.developerModel})
 		if specErr != nil {
 			err = specErr
 		} else {
@@ -173,11 +187,71 @@ func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr 
 		return err
 	}
 	env := mergeEnv(a.environ(), map[string]string{"HERDR_TANDEM_PROJECT_DIR": project, "HERDR_TANDEM_DEVELOPER": developerName, "HERDR_TANDEM_DEVELOPER_PANE_ID": developer.PaneID, "HERDR_TANDEM_SUPERVISOR_PANE_ID": current.PaneID, runtimeIDEnv: prepared.RuntimeID, sidebarModeEnv: string(mode), supervisorKindEnv: a.supervisor.ID(), developerKindEnv: a.developerAdapter.ID()})
-	launch, err := a.supervisor.BuildLaunch(supervisor.LaunchContext{ProjectDir: project, Executable: binPath, MCPEnv: mcpEnv, BaseEnv: env, Instructions: supervisorInstructions(a.now())})
+	cfgRoot := a.configRoot
+	if cfgRoot == "" && a.getenv != nil {
+		cfgRoot = a.getenv("HERDR_TANDEM_CONFIG_ROOT")
+	}
+	launchCtx := supervisor.LaunchContext{
+		ProjectDir:   project,
+		Executable:   binPath,
+		MCPEnv:       mcpEnv,
+		BaseEnv:      env,
+		Instructions: supervisorInstructions(a.now()),
+		RuntimeID:    prepared.RuntimeID,
+		Model:        a.supervisorModel,
+		ConfigRoot:   cfgRoot,
+	}
+
+	if lifecycle, ok := a.supervisor.(supervisor.LaunchLifecycle); ok {
+		artifact, artifactErr := lifecycle.LaunchArtifact(launchCtx)
+		if artifactErr != nil {
+			return fmt.Errorf("generate %s supervisor launch artifact: %w", a.supervisor.DisplayName(), artifactErr)
+		}
+		prepared, err = a.runtimeManager().Update(prepared.RuntimeID, func(record *runtimeRecord) error {
+			record.SupervisorAgentName = artifact
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("record supervisor artifact identity: %w", err)
+		}
+		a.debugf("supervisor prepare launch begin runtime_id=%q", prepared.RuntimeID)
+		if err := lifecycle.PrepareLaunch(ctx, a.runner, launchCtx, artifact); err != nil {
+			a.debugf("supervisor prepare launch failed runtime_id=%q error=%q", prepared.RuntimeID, err)
+			_, _ = a.runtimeManager().Update(prepared.RuntimeID, func(record *runtimeRecord) error {
+				record.SupervisorAgentName = ""
+				return nil
+			})
+			return fmt.Errorf("prepare %s supervisor: %w", a.supervisor.DisplayName(), err)
+		}
+		a.debugf("supervisor prepare launch success runtime_id=%q", prepared.RuntimeID)
+
+		defer func() {
+			a.debugf("supervisor cleanup defer begin runtime_id=%q", prepared.RuntimeID)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			cleanupErr := lifecycle.CleanupLaunch(cleanupCtx, a.runner, launchCtx, artifact)
+			if cleanupErr != nil {
+				a.debugf("supervisor cleanup failed runtime_id=%q error=%q", prepared.RuntimeID, cleanupErr)
+				if runErr != nil {
+					runErr = errors.Join(runErr, fmt.Errorf("cleanup %s supervisor: %w", a.supervisor.DisplayName(), cleanupErr))
+				} else {
+					runErr = fmt.Errorf("cleanup %s supervisor: %w", a.supervisor.DisplayName(), cleanupErr)
+				}
+			} else {
+				a.debugf("supervisor cleanup succeeded runtime_id=%q", prepared.RuntimeID)
+				_, _ = a.runtimeManager().Update(prepared.RuntimeID, func(record *runtimeRecord) error {
+					record.SupervisorAgentName = ""
+					return nil
+				})
+			}
+		}()
+	}
+
+	launch, err := a.supervisor.BuildLaunch(launchCtx)
 	if err != nil {
 		return fmt.Errorf("configure %s supervisor: %w", a.supervisor.DisplayName(), err)
 	}
-	return a.runner.RunAttached(launch.Args, launch.Env)
+	return a.runner.RunAttached(launch.Dir, launch.Args, launch.Env)
 }
 
 func (a *App) buildMCPEnvForRuntime(current herdr.PaneInfo, developerName, developerPaneID, project, runtimeID string, mode sidebarMode) (map[string]string, error) {
@@ -230,6 +304,22 @@ func (a *App) doctor(ctx context.Context) error {
 	check("Herdr Agent view API", a.helpContains(ctx, []string{"herdr", "api", "schema", "--json"}, "agent.view.set", "agent.view.clear"))
 	check("Herdr "+a.developerAdapter.DisplayName()+" transcript integration", a.checkAgyIntegration(ctx))
 	check("current Herdr pane", a.checkCurrentPane(ctx))
+	workspaceID := a.getenv("HERDR_WORKSPACE_ID")
+	paneID := a.getenv("HERDR_PANE_ID")
+	if paneID == "" {
+		paneID = a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID")
+	}
+	project := a.getenv("HERDR_TANDEM_PROJECT_DIR")
+	if project == "" {
+		if p, err := resolveProject("."); err == nil {
+			project = p
+		}
+	}
+	if workspaceID != "" && paneID != "" && project != "" {
+		if record, found, err := a.runtimeManager().FindForSupervisorPane(workspaceID, paneID, project); err == nil && found && record.SupervisorAgentName != "" {
+			check("supervisor custom agent", a.validateSupervisorArtifact(record))
+		}
+	}
 	if a.getenv("HERDR_TANDEM_SUPERVISOR_PANE_ID") != "" && a.getenv("HERDR_TANDEM_PROJECT_DIR") != "" {
 		check("herdr-tandem session", a.checkSessionHealth(ctx))
 		if taskErr := a.reportTaskJournal(ctx); taskErr != nil {
@@ -246,6 +336,78 @@ func (a *App) doctor(ctx context.Context) error {
 	a.debugf("doctor end ok=true")
 	fmt.Fprintln(a.stdout, "herdr-tandem is ready")
 	return nil
+}
+
+func (a *App) validateSupervisorArtifact(record runtimeRecord) error {
+	if record.SupervisorAgentName == "" {
+		return nil
+	}
+	cfgRoot := a.configRoot
+	if cfgRoot == "" && a.getenv != nil {
+		cfgRoot = a.getenv("HERDR_TANDEM_CONFIG_ROOT")
+	}
+	if cfgRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("read user home directory: %w", err)
+		}
+		cfgRoot = filepath.Join(home, ".gemini", "config")
+	}
+	dir := filepath.Join(cfgRoot, "agents", record.SupervisorAgentName)
+	file := filepath.Join(dir, "agent.md")
+
+	dirInfo, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("custom agent directory %q is missing; run herdr-tandem stop", dir)
+	}
+	if err != nil {
+		return fmt.Errorf("read custom agent directory %q: %w", dir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("custom agent directory %q is a symlink; run herdr-tandem stop", dir)
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("custom agent path %q is not a directory; run herdr-tandem stop", dir)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		return fmt.Errorf("custom agent directory %q permissions %o mismatch expected 0700; run herdr-tandem stop", dir, dirInfo.Mode().Perm())
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read custom agent directory %q: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "agent.md" {
+			return fmt.Errorf("unexpected file %q in custom agent directory; run herdr-tandem stop", entry.Name())
+		}
+	}
+
+	fileInfo, err := os.Lstat(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("custom agent file %q is missing; run herdr-tandem stop", file)
+	}
+	if err != nil {
+		return fmt.Errorf("read custom agent file %q: %w", file, err)
+	}
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("custom agent file %q is a symlink; run herdr-tandem stop", file)
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return fmt.Errorf("custom agent file %q is not a regular file; run herdr-tandem stop", file)
+	}
+	if fileInfo.Mode().Perm() != 0600 {
+		return fmt.Errorf("custom agent file %q permissions %o mismatch expected 0600; run herdr-tandem stop", file, fileInfo.Mode().Perm())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("read custom agent file %q: %w", file, err)
+	}
+	if err := supervisor.ValidateAgyArtifactOwnership(data, record.SupervisorAgentName); err != nil {
+		return fmt.Errorf("ownership mismatch in %q: %w; run herdr-tandem stop", file, err)
+	}
+
+	return fmt.Errorf("active custom agent artifact %s detected; run herdr-tandem stop", record.SupervisorAgentName)
 }
 
 type taskDelivery struct {
@@ -382,9 +544,42 @@ func (a *App) stop(ctx context.Context) error {
 		return err
 	}
 	manager := a.runtimeManager()
-	record, mode, err := a.runtimeSidebarRecord(info)
-	if err != nil {
-		return err
+	var record runtimeRecord
+	var mode sidebarMode
+	if strings.TrimSpace(a.getenv(supervisorKindEnv)) == "" {
+		discovered, found, findErr := manager.FindForSupervisorPane(info.workspaceID, info.supervisor, info.project)
+		if findErr != nil {
+			return findErr
+		}
+		if found {
+			record = discovered
+			m, parseErr := parseSidebarMode(record.SidebarMode)
+			if parseErr != nil {
+				return parseErr
+			}
+			mode = m
+			info.supervisorKind = record.SupervisorKind
+			info.developerKind = record.DeveloperKind
+			resolvedSupervisor, resolveErr := supervisor.DefaultRegistry().Resolve(record.SupervisorKind)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			a.supervisor = resolvedSupervisor
+		} else {
+			r, m, err := a.runtimeSidebarRecord(info)
+			if err != nil {
+				return err
+			}
+			record = r
+			mode = m
+		}
+	} else {
+		r, m, err := a.runtimeSidebarRecord(info)
+		if err != nil {
+			return err
+		}
+		record = r
+		mode = m
 	}
 	hasRecord := true
 	if strings.TrimSpace(a.getenv(runtimeIDEnv)) != "" && a.getenv(runtimeIDEnv) != record.RuntimeID {
@@ -427,6 +622,9 @@ func (a *App) stop(ctx context.Context) error {
 			}
 		}
 		if hasRecord {
+			if err := a.cleanupSupervisorArtifact(ctx, record, info); err != nil {
+				return err
+			}
 			clearAttempted, removeErr := manager.RemoveAndClearViewIfLast(ctx, record.RuntimeID, a.clearSidebarView)
 			if removeErr != nil && !clearAttempted {
 				return fmt.Errorf("clear herdr-tandem runtime ownership: %w", removeErr)
@@ -458,6 +656,9 @@ func (a *App) stop(ctx context.Context) error {
 		return err
 	}
 	if hasRecord {
+		if err := a.cleanupSupervisorArtifact(ctx, record, info); err != nil {
+			return err
+		}
 		clearAttempted, removeErr := manager.RemoveAndClearViewIfLast(ctx, record.RuntimeID, a.clearSidebarView)
 		if removeErr != nil && !clearAttempted {
 			return fmt.Errorf("clear herdr-tandem runtime ownership: %w", removeErr)
@@ -467,6 +668,36 @@ func (a *App) stop(ctx context.Context) error {
 		}
 	}
 	fmt.Fprintf(a.stdout, "stopped the agy developer; exit %s normally to finish\n", a.supervisor.DisplayName())
+	return nil
+}
+
+func (a *App) cleanupSupervisorArtifact(ctx context.Context, record runtimeRecord, info runtimeContext) error {
+	if record.SupervisorAgentName == "" {
+		return nil
+	}
+	supAdapter, err := supervisor.DefaultRegistry().Resolve(record.SupervisorKind)
+	if err != nil {
+		return fmt.Errorf("resolve supervisor %q for artifact cleanup: %w", record.SupervisorKind, err)
+	}
+	lifecycle, ok := supAdapter.(supervisor.LaunchLifecycle)
+	if !ok {
+		return nil
+	}
+	cfgRoot := a.configRoot
+	if cfgRoot == "" && a.getenv != nil {
+		cfgRoot = a.getenv("HERDR_TANDEM_CONFIG_ROOT")
+	}
+	launchCtx := supervisor.LaunchContext{
+		ProjectDir: info.project,
+		RuntimeID:  record.RuntimeID,
+		Model:      record.SupervisorModel,
+		ConfigRoot: cfgRoot,
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := lifecycle.CleanupLaunch(cleanupCtx, a.runner, launchCtx, record.SupervisorAgentName); err != nil {
+		return fmt.Errorf("clean up %s supervisor artifact: %w", supAdapter.DisplayName(), err)
+	}
 	return nil
 }
 

@@ -26,19 +26,22 @@ const (
 )
 
 type runtimeRecord struct {
-	Version          int       `json:"version"`
-	SupervisorKind   string    `json:"supervisor_kind"`
-	DeveloperKind    string    `json:"developer_kind"`
-	RuntimeID        string    `json:"runtime_id"`
-	BuildRevision    string    `json:"build_revision,omitempty"`
-	SidebarMode      string    `json:"sidebar_mode"`
-	WorkspaceID      string    `json:"workspace_id"`
-	SupervisorPaneID string    `json:"supervisor_pane_id"`
-	Developer        string    `json:"developer"`
-	DeveloperPaneID  string    `json:"developer_pane_id,omitempty"`
-	Project          string    `json:"project"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Version             int       `json:"version"`
+	SupervisorKind      string    `json:"supervisor_kind"`
+	DeveloperKind       string    `json:"developer_kind"`
+	RuntimeID           string    `json:"runtime_id"`
+	BuildRevision       string    `json:"build_revision,omitempty"`
+	SidebarMode         string    `json:"sidebar_mode"`
+	WorkspaceID         string    `json:"workspace_id"`
+	SupervisorPaneID    string    `json:"supervisor_pane_id"`
+	Developer           string    `json:"developer"`
+	DeveloperPaneID     string    `json:"developer_pane_id,omitempty"`
+	Project             string    `json:"project"`
+	SupervisorModel     string    `json:"supervisor_model,omitempty"`
+	DeveloperModel      string    `json:"developer_model,omitempty"`
+	SupervisorAgentName string    `json:"supervisor_agent_name,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 type runtimeLiveness struct {
 	AgentLive bool
@@ -126,11 +129,29 @@ func validateRuntimeRecord(record runtimeRecord) error {
 	if !runtimeIDIsSafe(record.RuntimeID) {
 		return errors.New("runtime ID is invalid")
 	}
-	if record.SupervisorKind != supervisor.CodexID && record.SupervisorKind != supervisor.OpenCodeID {
+	if record.SupervisorKind != supervisor.CodexID && record.SupervisorKind != supervisor.OpenCodeID && record.SupervisorKind != supervisor.AgyID {
 		return fmt.Errorf("supervisor kind %q is unsupported", record.SupervisorKind)
 	}
 	if record.DeveloperKind != developer.AgyID {
 		return fmt.Errorf("developer kind %q is unsupported", record.DeveloperKind)
+	}
+	if err := validateModelName(record.SupervisorModel); err != nil {
+		return fmt.Errorf("supervisor model is invalid: %w", err)
+	}
+	if err := validateModelName(record.DeveloperModel); err != nil {
+		return fmt.Errorf("developer model is invalid: %w", err)
+	}
+	if record.SupervisorModel != "" && record.SupervisorKind != supervisor.AgyID {
+		return fmt.Errorf("supervisor model is only supported with %s supervisor", supervisor.AgyID)
+	}
+	if record.SupervisorAgentName != "" {
+		expected := "herdr-tandem-" + record.RuntimeID
+		if record.SupervisorAgentName != expected {
+			return fmt.Errorf("supervisor agent name must be %q", expected)
+		}
+		if record.SupervisorKind != supervisor.AgyID {
+			return fmt.Errorf("supervisor agent name is only supported with %s supervisor", supervisor.AgyID)
+		}
 	}
 	if _, err := parseSidebarMode(record.SidebarMode); err != nil {
 		return err
@@ -140,6 +161,24 @@ func validateRuntimeRecord(record runtimeRecord) error {
 	}
 	if record.CreatedAt.IsZero() || record.UpdatedAt.IsZero() || record.UpdatedAt.Before(record.CreatedAt) {
 		return errors.New("timestamps are invalid")
+	}
+	return nil
+}
+
+func validateModelName(model string) error {
+	if model == "" {
+		return nil
+	}
+	if strings.HasPrefix(model, "-") {
+		return errors.New("model cannot start with a dash")
+	}
+	if len(model) > 128 {
+		return errors.New("model exceeds maximum length")
+	}
+	for _, r := range model {
+		if r <= 32 || r == 127 || r == '\x00' {
+			return errors.New("model contains invalid control characters or whitespace")
+		}
 	}
 	return nil
 }
@@ -368,6 +407,44 @@ func (m runtimeRecordManager) FindForScope(info runtimeContext) (runtimeRecord, 
 			if present && record.SupervisorKind == info.supervisorKind && record.DeveloperKind == info.developerKind && record.WorkspaceID == info.workspaceID && record.SupervisorPaneID == info.supervisor && record.Developer == info.developer && filepath.Clean(record.Project) == filepath.Clean(info.project) {
 				if exists {
 					return errors.New("multiple herdr-tandem runtime records match this supervisor")
+				}
+				found, exists = record, true
+			}
+		}
+		return nil
+	})
+	return found, exists, err
+}
+
+func (m runtimeRecordManager) FindForSupervisorPane(workspaceID, supervisorPaneID, project string) (runtimeRecord, bool, error) {
+	var found runtimeRecord
+	var exists bool
+	workspaceID = strings.TrimSpace(workspaceID)
+	supervisorPaneID = strings.TrimSpace(supervisorPaneID)
+	cleanProject := filepath.Clean(strings.TrimSpace(project))
+	if workspaceID == "" || supervisorPaneID == "" || cleanProject == "" || cleanProject == "." {
+		return runtimeRecord{}, false, errors.New("workspace ID, supervisor pane ID, and project are required")
+	}
+	err := m.withLock("runtime-find-pane", func() error {
+		entries, err := os.ReadDir(m.recordsDir())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			id := strings.TrimSuffix(entry.Name(), ".json")
+			record, present, err := m.loadByIDUnlocked(id)
+			if err != nil {
+				return err
+			}
+			if present && record.WorkspaceID == workspaceID && record.SupervisorPaneID == supervisorPaneID && filepath.Clean(record.Project) == cleanProject {
+				if exists {
+					return errors.New("multiple herdr-tandem runtime records match this supervisor pane")
 				}
 				found, exists = record, true
 			}

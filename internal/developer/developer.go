@@ -11,6 +11,13 @@ import (
 
 const AgyID = "agy"
 
+type StartOptions struct {
+	Name      string
+	PaneID    string
+	SessionID string
+	Model     string
+}
+
 type Adapter interface {
 	ID() string
 	DisplayName() string
@@ -21,7 +28,7 @@ type Adapter interface {
 	TrustPrompt() string
 	TranscriptRoot() string
 	RequiresProviderService() bool
-	StartSpec(name, paneID, sessionID string) (herdr.AgentStartSpec, error)
+	StartSpec(StartOptions) (herdr.AgentStartSpec, error)
 	SessionID(herdr.AgentInfo) (string, error)
 }
 
@@ -43,11 +50,18 @@ func (Agy) TranscriptRoot() string {
 	return filepath.Join(home, ".gemini", "antigravity-cli", "brain")
 }
 
-func (a Agy) StartSpec(name, paneID, sessionID string) (herdr.AgentStartSpec, error) {
-	sessionID = strings.TrimSpace(sessionID)
+func (a Agy) StartSpec(options StartOptions) (herdr.AgentStartSpec, error) {
+	name := strings.TrimSpace(options.Name)
+	paneID := strings.TrimSpace(options.PaneID)
+	sessionID := strings.TrimSpace(options.SessionID)
+	model := strings.TrimSpace(options.Model)
+
 	spec := herdr.AgentStartSpec{
 		Name: name, Kind: a.HerdrAgent(), PaneID: paneID, TimeoutMS: 60000,
 		Args: []string{"--dangerously-skip-permissions", "--mode", "accept-edits"},
+	}
+	if model != "" {
+		spec.Args = append(spec.Args, "--model", model)
 	}
 	if sessionID != "" {
 		spec.Args = append([]string{"--conversation", sessionID}, spec.Args...)

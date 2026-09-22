@@ -12,6 +12,7 @@ import (
 const (
 	CodexID    = "codex"
 	OpenCodeID = "opencode"
+	AgyID      = "agy"
 )
 
 type LaunchContext struct {
@@ -20,9 +21,19 @@ type LaunchContext struct {
 	MCPEnv       map[string]string
 	BaseEnv      []string
 	Instructions string
+	RuntimeID    string
+	Model        string
+	ConfigRoot   string
+}
+
+type LaunchLifecycle interface {
+	LaunchArtifact(LaunchContext) (string, error)
+	PrepareLaunch(context.Context, proc.Runner, LaunchContext, string) error
+	CleanupLaunch(context.Context, proc.Runner, LaunchContext, string) error
 }
 
 type LaunchSpec struct {
+	Dir  string
 	Args []string
 	Env  []string
 }
@@ -56,7 +67,7 @@ func NewRegistry(adapters ...Adapter) (Registry, error) {
 }
 
 func DefaultRegistry() Registry {
-	registry, err := NewRegistry(Codex{}, OpenCode{})
+	registry, err := NewRegistry(Codex{}, OpenCode{}, Agy{})
 	if err != nil {
 		panic(err)
 	}

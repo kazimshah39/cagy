@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kazimshah39/herdr-tandem/internal/herdr"
+	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
 )
 
 type sidebarMode string
@@ -34,8 +35,11 @@ func parseSidebarMode(value string) (sidebarMode, error) {
 	}
 }
 
-func (m sidebarMode) supervisorDisplayName() string {
+func (m sidebarMode) supervisorDisplayName(supervisorKind string) string {
 	if m == sidebarModeExpanded {
+		if strings.TrimSpace(supervisorKind) == supervisor.AgyID {
+			return expandedAgySupervisorDisplayName
+		}
 		return expandedSupervisorDisplayName
 	}
 	return compactDisplayName

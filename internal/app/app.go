@@ -22,17 +22,18 @@ const (
 	commandTimeoutMS         = 5 * 60 * 1000
 	developerReadyTimeoutMS  = 60 * 1000
 
-	paneOwnershipSource           = "herdr-tandem:pane-owner"
-	supervisorDisplaySource       = "herdr-tandem:supervisor-display"
-	developerDisplaySource        = "herdr-tandem:developer-display"
-	compactDisplayName            = "hdt"
-	expandedSupervisorDisplayName = "hdt Supervisor"
-	developerDisplayName          = "agy Developer"
-	runtimeIDEnv                  = "HERDR_TANDEM_RUNTIME_ID"
-	supervisorKindEnv             = "HERDR_TANDEM_SUPERVISOR_KIND"
-	developerKindEnv              = "HERDR_TANDEM_DEVELOPER_KIND"
-	runtimeIDToken                = "herdr_tandem_runtime_id"
-	buildRevisionToken            = "herdr_tandem_build_revision"
+	paneOwnershipSource              = "herdr-tandem:pane-owner"
+	supervisorDisplaySource          = "herdr-tandem:supervisor-display"
+	developerDisplaySource           = "herdr-tandem:developer-display"
+	compactDisplayName               = "hdt"
+	expandedSupervisorDisplayName    = "hdt Supervisor"
+	expandedAgySupervisorDisplayName = "agy Supervisor"
+	developerDisplayName             = "agy Developer"
+	runtimeIDEnv                     = "HERDR_TANDEM_RUNTIME_ID"
+	supervisorKindEnv                = "HERDR_TANDEM_SUPERVISOR_KIND"
+	developerKindEnv                 = "HERDR_TANDEM_DEVELOPER_KIND"
+	runtimeIDToken                   = "herdr_tandem_runtime_id"
+	buildRevisionToken               = "herdr_tandem_build_revision"
 )
 
 const supervisorPrompt = `You are the supervisor. The visible agy agent in the right Herdr pane is the developer.
@@ -85,6 +86,9 @@ type App struct {
 	installedBuild          func(string) (buildmeta.Identity, error)
 	providerServiceCheck    func(context.Context) error
 	diagnosticSink          func(string)
+	supervisorModel         string
+	developerModel          string
+	configRoot              string
 }
 
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
@@ -216,7 +220,7 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 		}
 		return a.stop(ctx)
 	default:
-		path, mode, supervisorID, err := parseStartArgs(args)
+		path, mode, supervisorID, supervisorModel, developerModel, err := parseStartArgs(args)
 		if err != nil {
 			return err
 		}
@@ -226,55 +230,112 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 				return err
 			}
 		}
+		a.supervisorModel = supervisorModel
+		a.developerModel = developerModel
 		return a.start(ctx, path, mode)
 	}
 }
 
-const startUsage = "usage: herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]"
+const startUsage = "usage: herdr-tandem [--expanded] [--supervisor codex|opencode|agy] [--supervisor-model <model>] [--developer-model <model>] [DIRECTORY]"
 
-func parseStartArgs(args []string) (string, sidebarMode, string, error) {
+func parseStartArgs(args []string) (string, sidebarMode, string, string, string, error) {
 	path := "."
 	pathSet := false
 	mode := sidebarModeCompact
 	expandedSet := false
 	supervisorSet := false
 	supervisorID := ""
+	supervisorModelSet := false
+	supervisorModel := ""
+	developerModelSet := false
+	developerModel := ""
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		switch arg {
-		case "--expanded":
+		switch {
+		case arg == "--expanded":
 			if expandedSet {
-				return "", "", "", fmt.Errorf("%s", startUsage)
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
 			}
 			expandedSet = true
 			mode = sidebarModeExpanded
-		case "--supervisor":
+		case arg == "--supervisor":
 			if supervisorSet || i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-				return "", "", "", fmt.Errorf("%s", startUsage)
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
 			}
 			supervisorSet = true
 			i++
 			supervisorID = args[i]
-		default:
-			if strings.HasPrefix(arg, "--supervisor=") {
-				if supervisorSet {
-					return "", "", "", fmt.Errorf("%s", startUsage)
-				}
-				supervisorSet = true
-				supervisorID = strings.TrimPrefix(arg, "--supervisor=")
-				if supervisorID == "" {
-					return "", "", "", fmt.Errorf("%s", startUsage)
-				}
-				continue
+		case strings.HasPrefix(arg, "--supervisor="):
+			if supervisorSet {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
 			}
+			supervisorSet = true
+			supervisorID = strings.TrimPrefix(arg, "--supervisor=")
+			if supervisorID == "" {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+			}
+		case arg == "--supervisor-model":
+			if supervisorModelSet || i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+			}
+			supervisorModelSet = true
+			i++
+			supervisorModel = args[i]
+		case strings.HasPrefix(arg, "--supervisor-model="):
+			if supervisorModelSet {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+			}
+			supervisorModelSet = true
+			supervisorModel = strings.TrimPrefix(arg, "--supervisor-model=")
+		case arg == "--developer-model":
+			if developerModelSet || i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+			}
+			developerModelSet = true
+			i++
+			developerModel = args[i]
+		case strings.HasPrefix(arg, "--developer-model="):
+			if developerModelSet {
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+			}
+			developerModelSet = true
+			developerModel = strings.TrimPrefix(arg, "--developer-model=")
+		default:
 			if strings.HasPrefix(arg, "-") || pathSet {
-				return "", "", "", fmt.Errorf("%s", startUsage)
+				return "", "", "", "", "", fmt.Errorf("%s", startUsage)
 			}
 			path = arg
 			pathSet = true
 		}
 	}
-	return path, mode, supervisorID, nil
+
+	if supervisorModelSet {
+		if strings.TrimSpace(supervisorModel) == "" {
+			return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+		}
+		if err := validateModelName(supervisorModel); err != nil {
+			return "", "", "", "", "", fmt.Errorf("%s: %w", startUsage, err)
+		}
+		effectiveSupervisor := supervisorID
+		if effectiveSupervisor == "" {
+			effectiveSupervisor = supervisor.CodexID
+		}
+		if effectiveSupervisor != supervisor.AgyID {
+			return "", "", "", "", "", fmt.Errorf("--supervisor-model is only supported with %s supervisor", supervisor.AgyID)
+		}
+	}
+
+	if developerModelSet {
+		if strings.TrimSpace(developerModel) == "" {
+			return "", "", "", "", "", fmt.Errorf("%s", startUsage)
+		}
+		if err := validateModelName(developerModel); err != nil {
+			return "", "", "", "", "", fmt.Errorf("%s: %w", startUsage, err)
+		}
+	}
+
+	return path, mode, supervisorID, supervisorModel, developerModel, nil
 }
 
 func supervisorIDFromArgs(args []string) (string, error) {
@@ -282,20 +343,27 @@ func supervisorIDFromArgs(args []string) (string, error) {
 		return "", nil
 	}
 	if len(args) == 1 && strings.HasPrefix(args[0], "--supervisor=") {
-		return strings.TrimPrefix(args[0], "--supervisor="), nil
+		id := strings.TrimPrefix(args[0], "--supervisor=")
+		if id == "" {
+			return "", fmt.Errorf("usage: herdr-tandem doctor [--supervisor codex|opencode|agy]")
+		}
+		return id, nil
 	}
 	if len(args) == 2 && args[0] == "--supervisor" && strings.TrimSpace(args[1]) != "" {
+		if strings.HasPrefix(args[1], "-") {
+			return "", fmt.Errorf("usage: herdr-tandem doctor [--supervisor codex|opencode|agy]")
+		}
 		return args[1], nil
 	}
-	return "", fmt.Errorf("usage: herdr-tandem doctor [--supervisor codex|opencode]")
+	return "", fmt.Errorf("usage: herdr-tandem doctor [--supervisor codex|opencode|agy]")
 }
 
 func (a *App) printHelp() {
 	fmt.Fprintln(a.stdout, `herdr-tandem - visible supervisor and agy developer in Herdr
 
 Usage:
-  herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]
-  herdr-tandem doctor [--supervisor codex|opencode]
+  herdr-tandem [--expanded] [--supervisor codex|opencode|agy] [--supervisor-model <model>] [--developer-model <model>] [DIRECTORY]
+  herdr-tandem doctor [--supervisor codex|opencode|agy]
   herdr-tandem stop
 
 Shorthand alias:

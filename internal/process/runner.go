@@ -20,7 +20,7 @@ type Result struct {
 type Runner interface {
 	LookPath(name string) (string, error)
 	Run(ctx context.Context, args ...string) (Result, error)
-	RunAttached(args []string, env []string) error
+	RunAttached(dir string, args []string, env []string) error
 }
 
 // OSRunner executes real local processes.
@@ -58,12 +58,15 @@ func (OSRunner) Run(ctx context.Context, args ...string) (Result, error) {
 	return result, nil
 }
 
-func (OSRunner) RunAttached(args []string, env []string) error {
+func (OSRunner) RunAttached(dir string, args []string, env []string) error {
 	if len(args) == 0 {
 		return errors.New("empty command")
 	}
 	// #nosec G204 -- callers choose a fixed supervisor executable and pass no shell string.
 	cmd := exec.Command(args[0], args[1:]...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

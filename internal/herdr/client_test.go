@@ -27,7 +27,7 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (proc.Result, error)
 	f.results = f.results[1:]
 	return result, nil
 }
-func (f *fakeRunner) RunAttached(_ []string, _ []string) error { return nil }
+func (f *fakeRunner) RunAttached(_ string, _ []string, _ []string) error { return nil }
 
 func testAgyStartSpec(name, paneID, sessionID string) AgentStartSpec {
 	spec := AgentStartSpec{Name: name, Kind: "agy", PaneID: paneID, TimeoutMS: 60000, Args: []string{"--dangerously-skip-permissions", "--mode", "accept-edits"}}

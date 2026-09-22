@@ -19,8 +19,7 @@ Set `HERDR_TANDEM_PROVIDER_SERVICE_URL` only when the service uses another loopb
 `herdr-tandem` is the canonical command. An `hdt` shorthand alias is installed alongside it.
 
 ```bash
-herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
-herdr-tandem --show-agents [--supervisor codex|opencode] [DIRECTORY]
+herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]
 herdr-tandem doctor [--supervisor codex|opencode]
 herdr-tandem stop
 ```
@@ -28,8 +27,7 @@ herdr-tandem stop
 Or using the `hdt` shorthand:
 
 ```bash
-hdt [--supervisor codex|opencode] [DIRECTORY]
-hdt --show-agents [--supervisor codex|opencode] [DIRECTORY]
+hdt [--expanded] [--supervisor codex|opencode] [DIRECTORY]
 hdt doctor [--supervisor codex|opencode]
 hdt stop
 ```
@@ -46,7 +44,7 @@ The default supervisor is Codex. OpenCode is selected explicitly with `--supervi
 
 ## Sidebar modes
 
-The normal command starts a compact project:
+Compact mode is the default:
 
 ```bash
 herdr-tandem  # or: hdt
@@ -57,16 +55,17 @@ Compact mode shows one real Herdr agent row labeled `hdt`:
 - The supervisor is shown while no Tandem-managed developer task is active.
 - The developer becomes the visible row before delegated work starts, so Herdr shows its native working or blocked indicator.
 - The supervisor becomes visible again after confirmed completion, safe recovery, safe forgetting, or stop.
+- Work typed manually in the developer pane does not switch the compact representative automatically because Herdr Tandem does not run a persistent watcher.
 
-Expanded mode is selected per project:
+Expanded mode is an explicit opt-in:
 
 ```bash
-herdr-tandem --show-agents  # or: hdt --show-agents
+herdr-tandem --expanded  # or: hdt --expanded
 ```
 
-Expanded mode always shows `hdt Supervisor` and `agy Developer` as separate rows. Starting a compact project does not hide an expanded project's developer, and starting an expanded project does not expand other projects.
+Expanded mode always shows both `hdt Supervisor` and `agy Developer` as separate real native rows. This ensures manual work typed directly in the developer pane remains visible even when the supervisor is idle or stopped. Starting an expanded project does not change other projects.
 
-Compact switching covers work submitted through Herdr Tandem. Work typed manually in the developer pane does not switch the compact representative automatically. Use expanded mode when both native states must remain visible.
+Starting a compact project does not hide an expanded project's developer, and starting an expanded project does not expand other projects.
 
 Herdr currently supports one transient Agent view per server. Herdr Tandem uses one stable projection that hides only panes carrying its explicit hidden visibility token. This keeps unrelated agents visible, but another tool that replaces Herdr's single transient view cannot be composed with Tandem's view.
 

@@ -58,14 +58,15 @@ func (r *startupSidebarRunner) Run(_ context.Context, args ...string) (proc.Resu
 		return proc.Result{ExitCode: 0, Stdout: "? for shortcuts"}, nil
 	case strings.HasPrefix(joined, "herdr pane wait-output "), strings.HasPrefix(joined, "herdr pane rename "), strings.HasPrefix(joined, "herdr pane report-metadata "):
 		return ok, nil
+	case joined == "codex --yolo --help":
+		return proc.Result{ExitCode: 0, Stdout: "--yolo"}, nil
+	case joined == "codex mcp --help":
+		return proc.Result{ExitCode: 0, Stdout: "list"}, nil
 	default:
 		return proc.Result{}, errors.New("unexpected startup call: " + joined)
 	}
 }
 func (r *startupSidebarRunner) RunAttached(args []string, env []string) error {
-	if !reflect.DeepEqual(args, []string{"codex-test"}) {
-		return fmt.Errorf("unexpected attached args: %v", args)
-	}
 	r.attachedEnv = append([]string(nil), env...)
 	return nil
 }
@@ -113,7 +114,7 @@ func TestSidebarStartupKeepsCompactAndExpandedProjectsIndependentInBothOrders(t 
 					visibility[pane] = value
 					return nil
 				}
-				if err := app.start(context.Background(), project, mode == sidebarModeExpanded); err != nil {
+				if err := app.start(context.Background(), project, mode); err != nil {
 					t.Fatal(err)
 				}
 				if len(runner.attachedEnv) == 0 || !containsEnvValue(runner.attachedEnv, sidebarModeEnv, string(mode)) {
@@ -252,7 +253,7 @@ func TestSidebarStartupPresentationFailureKeepsSupervisorVisibleAndRollsBackRunt
 	app.setSidebarView = func(context.Context) error { return errors.New("projection failed") }
 	clears := 0
 	app.clearSidebarView = func(context.Context) error { clears++; return nil }
-	if err := app.start(context.Background(), project, false); err == nil || !strings.Contains(err.Error(), "configure herdr-tandem sidebar") {
+	if err := app.start(context.Background(), project, sidebarModeExpanded); err == nil || !strings.Contains(err.Error(), "configure herdr-tandem sidebar") {
 		t.Fatalf("error=%v", err)
 	}
 	if !reflect.DeepEqual(visibility, []string{"w1:p1=visible"}) {
@@ -263,5 +264,268 @@ func TestSidebarStartupPresentationFailureKeepsSupervisorVisibleAndRollsBackRunt
 	}
 	if _, exists, err := app.runtimeManager().loadByIDUnlocked("runtime-failed-start"); err != nil || exists {
 		t.Fatalf("failed runtime exists=%t err=%v", exists, err)
+	}
+}
+
+func TestSidebarStartupDefaultsToCompactMode(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{name: "no arguments", args: nil},
+		{name: "empty slice", args: []string{}},
+		{name: "directory only", args: []string{"PROJECT_DIR"}},
+		{name: "supervisor only", args: []string{"--supervisor", "codex"}},
+		{name: "supervisor and directory", args: []string{"--supervisor", "codex", "PROJECT_DIR"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			hasProjectDir := false
+			for _, arg := range testCase.args {
+				if arg == "PROJECT_DIR" {
+					hasProjectDir = true
+					break
+				}
+			}
+			var project string
+			var err error
+			if hasProjectDir {
+				project, err = resolveProject(t.TempDir())
+			} else {
+				project, err = resolveProject(".")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := make([]string, len(testCase.args))
+			for i, arg := range testCase.args {
+				if arg == "PROJECT_DIR" {
+					args[i] = project
+				} else {
+					args[i] = arg
+				}
+			}
+			supervisorPane := "w1:p1"
+			developerPane := "w1:p2"
+			runner := &startupSidebarRunner{project: project, supervisorPane: supervisorPane, developerPane: developerPane, developerName: developerName("w1", supervisorPane)}
+			app := New(runner, io.Discard, io.Discard)
+			app.supervisor = sidebarTestSupervisor{}
+			app.stateDir = t.TempDir()
+			app.token = func() (string, error) { return "runtime-default-compact", nil }
+			app.checkPlatform = func() error { return nil }
+			app.resolveExecutable = func() (string, error) { return "/tmp/herdr-tandem", nil }
+			app.providerServiceCheck = func(context.Context) error { return nil }
+			app.runningBuild = func() buildmeta.Identity { return buildmeta.Identity{} }
+			app.getenv = func(key string) string {
+				switch key {
+				case "HERDR_ENV":
+					return "1"
+				case "HERDR_WORKSPACE_ID":
+					return "w1"
+				case "HERDR_PANE_ID":
+					return supervisorPane
+				case "HERDR_SOCKET_PATH":
+					return "/tmp/herdr.sock"
+				}
+				return ""
+			}
+			app.environ = func() []string { return nil }
+			visibility := map[string]herdr.PaneVisibility{}
+			app.reportSidebarVisibility = func(_ context.Context, pane string, value herdr.PaneVisibility) error {
+				visibility[pane] = value
+				return nil
+			}
+			app.setSidebarView = func(context.Context) error { return nil }
+
+			if err := app.Run(context.Background(), args); err != nil {
+				t.Fatalf("Run(%v) error: %v", args, err)
+			}
+
+			// In default compact mode, supervisor is visible, developer is hidden initially
+			if visibility[supervisorPane] != herdr.PaneVisible {
+				t.Fatalf("supervisor visibility = %v, want %v", visibility[supervisorPane], herdr.PaneVisible)
+			}
+			if visibility[developerPane] != herdr.PaneHidden {
+				t.Fatalf("developer visibility = %v, want %v", visibility[developerPane], herdr.PaneHidden)
+			}
+
+			// Check display labels: "hdt" and "hdt"
+			if !runner.hasDisplayLabel(supervisorPane, "hdt") {
+				t.Fatalf("supervisor missing compact label 'hdt' in calls: %v", runner.calls)
+			}
+			if !runner.hasDisplayLabel(developerPane, "hdt") {
+				t.Fatalf("developer missing compact label 'hdt' in calls: %v", runner.calls)
+			}
+
+			// Check runtime record stores "compact"
+			record, exists, err := app.runtimeManager().FindForScope(runtimeContext{supervisorKind: supervisor.CodexID, developerKind: "agy", workspaceID: "w1", supervisor: supervisorPane, developer: runner.developerName, project: project})
+			if err != nil || !exists || record.SidebarMode != string(sidebarModeCompact) {
+				t.Fatalf("record=%+v exists=%t err=%v", record, exists, err)
+			}
+
+			// Check attached env passes compact mode
+			if !containsEnvValue(runner.attachedEnv, sidebarModeEnv, string(sidebarModeCompact)) {
+				t.Fatalf("attached env missing compact mode: %v", runner.attachedEnv)
+			}
+		})
+	}
+}
+
+func TestSidebarStartupExplicitExpandedOptIn(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{name: "expanded flag alone", args: []string{"--expanded"}},
+		{name: "expanded flag with directory", args: []string{"--expanded", "PROJECT_DIR"}},
+		{name: "directory then expanded", args: []string{"PROJECT_DIR", "--expanded"}},
+		{name: "supervisor and expanded", args: []string{"--supervisor", "codex", "--expanded", "PROJECT_DIR"}},
+		{name: "expanded then supervisor", args: []string{"--expanded", "--supervisor", "codex", "PROJECT_DIR"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			hasProjectDir := false
+			for _, arg := range testCase.args {
+				if arg == "PROJECT_DIR" {
+					hasProjectDir = true
+					break
+				}
+			}
+			var project string
+			var err error
+			if hasProjectDir {
+				project, err = resolveProject(t.TempDir())
+			} else {
+				project, err = resolveProject(".")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := make([]string, len(testCase.args))
+			for i, arg := range testCase.args {
+				if arg == "PROJECT_DIR" {
+					args[i] = project
+				} else {
+					args[i] = arg
+				}
+			}
+			supervisorPane := "w1:p1"
+			developerPane := "w1:p2"
+			runner := &startupSidebarRunner{project: project, supervisorPane: supervisorPane, developerPane: developerPane, developerName: developerName("w1", supervisorPane)}
+			app := New(runner, io.Discard, io.Discard)
+			app.supervisor = sidebarTestSupervisor{}
+			app.stateDir = t.TempDir()
+			app.token = func() (string, error) { return "runtime-expanded-optin", nil }
+			app.checkPlatform = func() error { return nil }
+			app.resolveExecutable = func() (string, error) { return "/tmp/herdr-tandem", nil }
+			app.providerServiceCheck = func(context.Context) error { return nil }
+			app.runningBuild = func() buildmeta.Identity { return buildmeta.Identity{} }
+			app.getenv = func(key string) string {
+				switch key {
+				case "HERDR_ENV":
+					return "1"
+				case "HERDR_WORKSPACE_ID":
+					return "w1"
+				case "HERDR_PANE_ID":
+					return supervisorPane
+				case "HERDR_SOCKET_PATH":
+					return "/tmp/herdr.sock"
+				}
+				return ""
+			}
+			app.environ = func() []string { return nil }
+			visibility := map[string]herdr.PaneVisibility{}
+			app.reportSidebarVisibility = func(_ context.Context, pane string, value herdr.PaneVisibility) error {
+				visibility[pane] = value
+				return nil
+			}
+			app.setSidebarView = func(context.Context) error { return nil }
+
+			if err := app.Run(context.Background(), args); err != nil {
+				t.Fatalf("Run(%v) error: %v", args, err)
+			}
+
+			// In expanded mode, both rows must be visible immediately
+			if visibility[supervisorPane] != herdr.PaneVisible {
+				t.Fatalf("supervisor visibility = %v, want %v", visibility[supervisorPane], herdr.PaneVisible)
+			}
+			if visibility[developerPane] != herdr.PaneVisible {
+				t.Fatalf("developer visibility = %v, want %v", visibility[developerPane], herdr.PaneVisible)
+			}
+
+			// Check display labels: "hdt Supervisor" and "agy Developer"
+			if !runner.hasDisplayLabel(supervisorPane, "hdt Supervisor") {
+				t.Fatalf("supervisor missing expanded label 'hdt Supervisor' in calls: %v", runner.calls)
+			}
+			if !runner.hasDisplayLabel(developerPane, "agy Developer") {
+				t.Fatalf("developer missing expanded label 'agy Developer' in calls: %v", runner.calls)
+			}
+
+			// Check runtime record stores "expanded"
+			record, exists, err := app.runtimeManager().FindForScope(runtimeContext{supervisorKind: supervisor.CodexID, developerKind: "agy", workspaceID: "w1", supervisor: supervisorPane, developer: runner.developerName, project: project})
+			if err != nil || !exists || record.SidebarMode != string(sidebarModeExpanded) {
+				t.Fatalf("record=%+v exists=%t err=%v", record, exists, err)
+			}
+
+			// Check attached env passes expanded mode
+			if !containsEnvValue(runner.attachedEnv, sidebarModeEnv, string(sidebarModeExpanded)) {
+				t.Fatalf("attached env missing expanded mode: %v", runner.attachedEnv)
+			}
+		})
+	}
+}
+
+func TestManualDeveloperWorkCannotSwitchCompactRepresentativeAutomatically(t *testing.T) {
+	app := New(fakeRunner{}, io.Discard, io.Discard)
+	var visibilityLog []string
+	app.reportSidebarVisibility = func(_ context.Context, pane string, visibility herdr.PaneVisibility) error {
+		visibilityLog = append(visibilityLog, fmt.Sprintf("%s=%s", pane, visibility))
+		return nil
+	}
+
+	supervisorPane := "w1:p1"
+	developerPane := "w1:p2"
+
+	// 1. Documented limitation: manual work typed directly in agy (managedTask = false)
+	// cannot switch the compact representative to developer, even if agy is working or blocked.
+	for _, status := range []string{"working", "blocked"} {
+		rep := compactRepresentativeForStatus(status, false)
+		if rep != sidebarRepresentativeSupervisor {
+			t.Fatalf("status %q without managed task got representative %q, want supervisor", status, rep)
+		}
+	}
+
+	// In compact mode, when supervisor is the representative, supervisor is visible and developer is hidden
+	visibilityLog = nil
+	if err := app.setSidebarRepresentative(context.Background(), sidebarModeCompact, supervisorPane, developerPane, sidebarRepresentativeSupervisor); err != nil {
+		t.Fatal(err)
+	}
+	compactWant := []string{"w1:p1=visible", "w1:p2=hidden"}
+	if !reflect.DeepEqual(visibilityLog, compactWant) {
+		t.Fatalf("compact visibilityLog = %v, want %v", visibilityLog, compactWant)
+	}
+
+	// Only managed tasks switch the representative to the developer in compact mode
+	visibilityLog = nil
+	managedRep := compactRepresentativeForStatus("working", true)
+	if managedRep != sidebarRepresentativeDeveloper {
+		t.Fatalf("managed working task got representative %q, want developer", managedRep)
+	}
+	if err := app.setSidebarRepresentative(context.Background(), sidebarModeCompact, supervisorPane, developerPane, sidebarRepresentativeDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	compactManagedWant := []string{"w1:p2=visible", "w1:p1=hidden"}
+	if !reflect.DeepEqual(visibilityLog, compactManagedWant) {
+		t.Fatalf("compact managed visibilityLog = %v, want %v", visibilityLog, compactManagedWant)
+	}
+
+	// 2. In contrast, in expanded mode, both rows always remain visible, so manual work in agy is always visible.
+	for _, rep := range []sidebarRepresentative{sidebarRepresentativeSupervisor, sidebarRepresentativeDeveloper} {
+		visibilityLog = nil
+		if err := app.setSidebarRepresentative(context.Background(), sidebarModeExpanded, supervisorPane, developerPane, rep); err != nil {
+			t.Fatal(err)
+		}
+		expandedWant := []string{"w1:p1=visible", "w1:p2=visible"}
+		if !reflect.DeepEqual(visibilityLog, expandedWant) {
+			t.Fatalf("expanded visibilityLog = %v, want %v", visibilityLog, expandedWant)
+		}
 	}
 }

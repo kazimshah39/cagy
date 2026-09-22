@@ -24,13 +24,6 @@ const (
 	sidebarRepresentativeDeveloper  sidebarRepresentative = "developer"
 )
 
-func sidebarModeFromShowAgents(showAgents bool) sidebarMode {
-	if showAgents {
-		return sidebarModeExpanded
-	}
-	return sidebarModeCompact
-}
-
 func parseSidebarMode(value string) (sidebarMode, error) {
 	mode := sidebarMode(strings.TrimSpace(value))
 	switch mode {

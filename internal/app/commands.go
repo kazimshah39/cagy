@@ -12,8 +12,8 @@ import (
 	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
 )
 
-func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr error) {
-	a.debugf("start begin path=%q show_agents=%t", path, showAgents)
+func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr error) {
+	a.debugf("start begin path=%q mode=%q", path, mode)
 	if err := a.checkPlatform(); err != nil {
 		return err
 	}
@@ -60,7 +60,6 @@ func (a *App) start(ctx context.Context, path string, showAgents bool) (runErr e
 		return fmt.Errorf("herdr-tandem supervisor tab is missing")
 	}
 	developerName := developerName(workspaceID, current.PaneID)
-	mode := sidebarModeFromShowAgents(showAgents)
 	startInfo := runtimeContext{supervisorKind: a.supervisor.ID(), developerKind: a.developerAdapter.ID(), workspaceID: workspaceID, supervisor: current.PaneID, developer: developerName, project: project}
 	buildRevision := "unknown"
 	if a.runningBuild != nil {

@@ -26,32 +26,60 @@ func TestSupervisorPromptUsesProviderManagedModeAndNativeTools(t *testing.T) {
 
 func TestParseStartArgsAndSupervisorSelection(t *testing.T) {
 	tests := []struct {
-		args     []string
-		wantPath string
-		wantShow bool
-		wantErr  bool
+		name           string
+		args           []string
+		wantPath       string
+		wantMode       sidebarMode
+		wantSupervisor string
+		wantErr        bool
 	}{
-		{args: nil, wantPath: "."},
-		{args: []string{"/tmp/project"}, wantPath: "/tmp/project"},
-		{args: []string{"--show-agents", "/tmp/project"}, wantPath: "/tmp/project", wantShow: true},
-		{args: []string{"one", "two"}, wantErr: true},
-		{args: []string{"--unknown"}, wantErr: true},
+		{name: "nil args default compact", args: nil, wantPath: ".", wantMode: sidebarModeCompact},
+		{name: "empty args default compact", args: []string{}, wantPath: ".", wantMode: sidebarModeCompact},
+		{name: "path only default compact", args: []string{"/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeCompact},
+		{name: "expanded alone", args: []string{"--expanded"}, wantPath: ".", wantMode: sidebarModeExpanded},
+		{name: "expanded with path", args: []string{"--expanded", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded},
+		{name: "path then expanded", args: []string{"/tmp/project", "--expanded"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded},
+		{name: "supervisor only default compact", args: []string{"--supervisor", "opencode"}, wantPath: ".", wantMode: sidebarModeCompact, wantSupervisor: "opencode"},
+		{name: "supervisor with path default compact", args: []string{"--supervisor", "opencode", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeCompact, wantSupervisor: "opencode"},
+		{name: "supervisor equal with path default compact", args: []string{"--supervisor=opencode", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeCompact, wantSupervisor: "opencode"},
+		{name: "supervisor and expanded with path", args: []string{"--supervisor", "opencode", "--expanded", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded, wantSupervisor: "opencode"},
+		{name: "expanded and supervisor with path", args: []string{"--expanded", "--supervisor", "opencode", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded, wantSupervisor: "opencode"},
+		{name: "expanded and supervisor equal with path", args: []string{"--expanded", "--supervisor=opencode", "/tmp/project"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded, wantSupervisor: "opencode"},
+		{name: "path then expanded then supervisor", args: []string{"/tmp/project", "--expanded", "--supervisor=opencode"}, wantPath: "/tmp/project", wantMode: sidebarModeExpanded, wantSupervisor: "opencode"},
+		{name: "legacy compact rejected", args: []string{"--compact"}, wantErr: true},
+		{name: "legacy compact with path rejected", args: []string{"--compact", "/tmp/project"}, wantErr: true},
+		{name: "legacy show-agents rejected", args: []string{"--show-agents", "/tmp/project"}, wantErr: true},
+		{name: "legacy show-agents alone rejected", args: []string{"--show-agents"}, wantErr: true},
+		{name: "duplicate expanded rejected", args: []string{"--expanded", "--expanded"}, wantErr: true},
+		{name: "duplicate expanded with path rejected", args: []string{"--expanded", "/tmp/project", "--expanded"}, wantErr: true},
+		{name: "duplicate supervisor space-separated rejected", args: []string{"--supervisor", "codex", "--supervisor", "opencode"}, wantErr: true},
+		{name: "duplicate supervisor equal rejected", args: []string{"--supervisor=codex", "--supervisor=opencode"}, wantErr: true},
+		{name: "duplicate supervisor mixed equal-first rejected", args: []string{"--supervisor=codex", "--supervisor", "opencode"}, wantErr: true},
+		{name: "duplicate supervisor mixed space-first rejected", args: []string{"--supervisor", "codex", "--supervisor=opencode"}, wantErr: true},
+		{name: "supervisor missing argument rejected", args: []string{"--supervisor"}, wantErr: true},
+		{name: "supervisor followed by flag rejected", args: []string{"--supervisor", "--expanded"}, wantErr: true},
+		{name: "supervisor equal empty rejected", args: []string{"--supervisor="}, wantErr: true},
+		{name: "multiple paths rejected", args: []string{"one", "two"}, wantErr: true},
+		{name: "multiple paths with expanded rejected", args: []string{"--expanded", "one", "two"}, wantErr: true},
+		{name: "unknown flag rejected", args: []string{"--unknown"}, wantErr: true},
+		{name: "expanded flag with value rejected", args: []string{"--expanded=true"}, wantErr: true},
 	}
 	for _, test := range tests {
-		path, show, supervisorID, err := parseStartArgs(test.args)
-		if test.wantErr {
-			if err == nil {
-				t.Fatalf("args=%#v: expected error", test.args)
+		t.Run(test.name, func(t *testing.T) {
+			path, mode, supervisorID, err := parseStartArgs(test.args)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("args=%#v: expected error", test.args)
+				}
+				return
 			}
-			continue
-		}
-		if err != nil || path != test.wantPath || show != test.wantShow || supervisorID != "" {
-			t.Fatalf("args=%#v path=%q show=%t err=%v", test.args, path, show, err)
-		}
-	}
-	path, show, supervisorID, err := parseStartArgs([]string{"--supervisor", "opencode", "--show-agents", "/tmp/project"})
-	if err != nil || path != "/tmp/project" || !show || supervisorID != "opencode" {
-		t.Fatalf("supervisor parse path=%q show=%t id=%q err=%v", path, show, supervisorID, err)
+			if err != nil {
+				t.Fatalf("args=%#v unexpected error: %v", test.args, err)
+			}
+			if path != test.wantPath || mode != test.wantMode || supervisorID != test.wantSupervisor {
+				t.Fatalf("args=%#v got path=%q mode=%q supervisor=%q, want path=%q mode=%q supervisor=%q", test.args, path, mode, supervisorID, test.wantPath, test.wantMode, test.wantSupervisor)
+			}
+		})
 	}
 }
 

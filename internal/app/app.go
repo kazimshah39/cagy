@@ -159,8 +159,9 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 			a.debugf("run end command=%q ok=true elapsed=%s", command, time.Since(started).Round(time.Millisecond))
 		}
 	}()
+
 	if len(args) == 0 {
-		return a.start(ctx, ".", false)
+		return a.start(ctx, ".", sidebarModeCompact)
 	}
 
 	switch args[0] {
@@ -215,7 +216,7 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 		}
 		return a.stop(ctx)
 	default:
-		path, showAgents, supervisorID, err := parseStartArgs(args)
+		path, mode, supervisorID, err := parseStartArgs(args)
 		if err != nil {
 			return err
 		}
@@ -225,39 +226,55 @@ func (a *App) Run(ctx context.Context, args []string) (runErr error) {
 				return err
 			}
 		}
-		return a.start(ctx, path, showAgents)
+		return a.start(ctx, path, mode)
 	}
 }
 
-func parseStartArgs(args []string) (string, bool, string, error) {
+const startUsage = "usage: herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]"
+
+func parseStartArgs(args []string) (string, sidebarMode, string, error) {
 	path := "."
 	pathSet := false
-	showAgents := false
+	mode := sidebarModeCompact
+	expandedSet := false
+	supervisorSet := false
 	supervisorID := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
-		case "--show-agents":
-			showAgents = true
-		case "--supervisor":
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-				return "", false, "", fmt.Errorf("usage: herdr-tandem --supervisor codex|opencode [--show-agents] [DIRECTORY]")
+		case "--expanded":
+			if expandedSet {
+				return "", "", "", fmt.Errorf("%s", startUsage)
 			}
+			expandedSet = true
+			mode = sidebarModeExpanded
+		case "--supervisor":
+			if supervisorSet || i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", "", "", fmt.Errorf("%s", startUsage)
+			}
+			supervisorSet = true
 			i++
 			supervisorID = args[i]
 		default:
 			if strings.HasPrefix(arg, "--supervisor=") {
+				if supervisorSet {
+					return "", "", "", fmt.Errorf("%s", startUsage)
+				}
+				supervisorSet = true
 				supervisorID = strings.TrimPrefix(arg, "--supervisor=")
+				if supervisorID == "" {
+					return "", "", "", fmt.Errorf("%s", startUsage)
+				}
 				continue
 			}
 			if strings.HasPrefix(arg, "-") || pathSet {
-				return "", false, "", fmt.Errorf("usage: herdr-tandem --supervisor codex|opencode [--show-agents] [DIRECTORY]")
+				return "", "", "", fmt.Errorf("%s", startUsage)
 			}
 			path = arg
 			pathSet = true
 		}
 	}
-	return path, showAgents, supervisorID, nil
+	return path, mode, supervisorID, nil
 }
 
 func supervisorIDFromArgs(args []string) (string, error) {
@@ -277,8 +294,7 @@ func (a *App) printHelp() {
 	fmt.Fprintln(a.stdout, `herdr-tandem - visible supervisor and agy developer in Herdr
 
 Usage:
-  herdr-tandem [--supervisor codex|opencode] [DIRECTORY]
-  herdr-tandem --show-agents [--supervisor codex|opencode] [DIRECTORY]
+  herdr-tandem [--expanded] [--supervisor codex|opencode] [DIRECTORY]
   herdr-tandem doctor [--supervisor codex|opencode]
   herdr-tandem stop
 

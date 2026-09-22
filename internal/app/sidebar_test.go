@@ -13,10 +13,7 @@ import (
 	proc "github.com/kazimshah39/herdr-tandem/internal/process"
 )
 
-func TestSidebarModeParsingLabelsAndFlagMapping(t *testing.T) {
-	if sidebarModeFromShowAgents(false) != sidebarModeCompact || sidebarModeFromShowAgents(true) != sidebarModeExpanded {
-		t.Fatal("show-agents flag mapping is wrong")
-	}
+func TestSidebarModeParsingAndLabels(t *testing.T) {
 	for _, value := range []string{"", "legacy", "COMPACT", " compact " + "extra"} {
 		if _, err := parseSidebarMode(value); err == nil {
 			t.Fatalf("invalid mode %q was accepted", value)

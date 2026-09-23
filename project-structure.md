@@ -27,6 +27,22 @@ Developer adapter: agy
 
 Developer startup validates readiness with a bounded 60-second deadline (`? for shortcuts`), interactively accepts the project trust screen if presented, and safely handles transient shell readiness races (`agent_pane_busy`) on newly split panes.
 
+## Audible notifications and terminal bell architecture
+
+During active task execution, the `agy` developer process emits ASCII BEL (`0x07`) bytes on tool confirmation and step notification events via its internal notification handler. Herdr's PTY reader engine receives these characters from the child pane PTY and forwards them directly to the outer terminal `stdout`, causing host system alert sounds (beeps).
+
+### Separation from Herdr completion sound
+
+Herdr's agent completion chime (`ui.sound`) is an independent system: Herdr monitors agent lifecycle state changes and plays a completion audio file (`sounds/done.mp3`) when an agent enters the `done` state. Terminal BEL bytes emitted during active tool execution are unrelated to Herdr's completion sound.
+
+### Upstream limitations and Tandem policy
+
+- Neither `agy` nor `herdr` provides a per-session launch flag, environment variable, or per-pane socket API command to selectively suppress terminal BEL characters without disabling sounds globally.
+- `agy`'s sound notification toggle is strictly global, read from `~/.gemini/antigravity-cli/settings.json` (`"notifications": false`).
+- Herdr Tandem strictly adheres to isolation boundaries: it never modifies or depends on global user configuration files (`~/.gemini/antigravity-cli/settings.json` or `~/.config/herdr/config.toml`), and it does not insert fragile PTY filters or process shims that would break Herdr's process and agent lifecycle tracking.
+- Required launch contracts remain intact: agy developer always launches with `--dangerously-skip-permissions --mode accept-edits`, effective `--model`, and exact `--conversation <id>` resume (`--continue` is never used). Supervisor adapters remain completely isolated.
+- Users who want to mute agy tool confirmation chimes globally on their Mac can set `"notifications": false` in `~/.gemini/antigravity-cli/settings.json`; this suppresses agy's terminal BELs during active execution while Herdr's semantic completion sound continues to fire on agent completion.
+
 ## Asynchronous MCP delegation
 
 `delegate_task` is a short submission operation, not a long-running result call. It validates the runtime and developer, writes the private atomic task journal, submits the prompt exactly once with `herdr agent prompt --wait`, records the monitoring phase, and returns `running` to the supervisor.

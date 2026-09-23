@@ -53,6 +53,22 @@ func (Agy) TranscriptRoot() string {
 	return filepath.Join(home, ".gemini", "antigravity-cli", "brain")
 }
 
+// StartSpec constructs the Herdr agent start specification for agy.
+//
+// Terminal bells and notifications:
+// The agy developer emits ASCII BEL (0x07) bytes during active tasks on tool
+// confirmations and notifications via its internal notification handler. Herdr's
+// PTY reader unconditionally forwards all received terminal BEL characters to the
+// foreground client stdout, causing host terminal beeps. Official documentation
+// and binary inspection confirm that neither agy nor Herdr exposes a per-session
+// CLI launch flag or environment variable to selectively suppress terminal bells
+// without losing Herdr's separate agent completion sound ([ui.sound]).
+//
+// Herdr Tandem strictly avoids writing to global user configuration files
+// (~/.gemini/antigravity-cli/settings.json or ~/.config/herdr/config.toml) and
+// avoids fragile PTY proxies or process interception. The developer launch
+// specification strictly retains the required YOLO flags (--dangerously-skip-permissions,
+// --mode accept-edits), model overrides, and exact --conversation resume.
 func (a Agy) StartSpec(options StartOptions) (herdr.AgentStartSpec, error) {
 	name := strings.TrimSpace(options.Name)
 	paneID := strings.TrimSpace(options.PaneID)

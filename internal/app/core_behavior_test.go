@@ -17,6 +17,17 @@ func TestSupervisorPromptUsesProviderManagedModeAndNativeTools(t *testing.T) {
 			t.Fatalf("supervisor prompt missing %q", tool)
 		}
 	}
+	for _, required := range []string{"returns after submission", "Poll task_status", "does not return the final answer", "Do not call delegate_task again", "completed_unacknowledged"} {
+		if !strings.Contains(supervisorPrompt, required) {
+			t.Fatalf("supervisor prompt missing async workflow instruction %q", required)
+		}
+	}
+	delegateIndex := strings.Index(supervisorPrompt, "delegate_task")
+	recoverIndex := strings.Index(supervisorPrompt, "recover_task")
+	ackIndex := strings.Index(supervisorPrompt, "acknowledge_task")
+	if delegateIndex < 0 || recoverIndex <= delegateIndex || ackIndex <= recoverIndex {
+		t.Fatalf("supervisor prompt workflow order is invalid")
+	}
 	for _, forbidden := range []string{"herdr-tandem accounts", "agy -p /quota", "agy -p /model"} {
 		if strings.Contains(strings.ToLower(supervisorPrompt), strings.ToLower(forbidden)) {
 			t.Fatalf("supervisor prompt still mentions removed native account behavior: %q", forbidden)

@@ -1,7 +1,7 @@
 # Herdr Tandem Project Structure
 
 **Status:** Provider-managed, adapter-based architecture
-**Date:** September 21, 2026
+**Date:** September 23, 2026
 
 ## Purpose
 
@@ -26,6 +26,25 @@ Developer adapter: agy
 ## Developer readiness
 
 Developer startup validates readiness with a bounded 60-second deadline (`? for shortcuts`), interactively accepts the project trust screen if presented, and safely handles transient shell readiness races (`agent_pane_busy`) on newly split panes.
+
+## Asynchronous MCP delegation
+
+`delegate_task` is a short submission operation, not a long-running result call. It validates the runtime and developer, writes the private atomic task journal, submits the prompt exactly once with `herdr agent prompt --wait`, records the monitoring phase, and returns `running` to the supervisor.
+
+A bounded goroutine inside the existing stdio `herdr-tandem mcp-server` process then monitors the visible developer for up to 30 minutes. It is tied to that MCP process lifetime and is not a daemon, queue, network service, or persistent worker. The monitor uses a detached bounded context, so cancellation of the original MCP request cannot cancel a task after submission. If the MCP process exits, the durable journal remains the source of truth and later `task_status` or `recover_task` calls inspect the live developer and exact transcript without resubmitting.
+
+After the journal reaches `completed_unacknowledged`, `blocked`, or `uncertain`, the monitor validates the supervisor pane ownership, workspace, tab, project, and agent kind. It waits for that supervisor to become idle, then submits one fixed wake prompt telling it to call `task_status`. MCP startup performs the same check for terminal journal state left by a prior process. This event-driven wake uses no task text, answer, receipt, transcript, or developer-controlled content and avoids relying on a nonexistent passive developer report.
+
+The supervisor workflow is:
+
+1. Call `task_status` before new work.
+2. Call `delegate_task` once.
+3. Poll `task_status` while it reports `submitting` or `running`; never stop on the assumption that the developer will report back. A verified terminal-state wake provides a second recovery path if the supervisor becomes idle.
+4. Call `recover_task` when status is `completed_unacknowledged`.
+5. Review the result and tests.
+6. Call `acknowledge_task` with the recovery receipt.
+
+The emergency shell command `herdr-tandem ask` remains synchronous so a human caller receives the answer directly. Both paths share the same watchdog, transcript matching, journal phases, and exactly-once submission guard.
 
 ## Provider service boundary
 
@@ -57,6 +76,7 @@ Model versions are intentionally pinned constants in code rather than unpinned o
 ### Capability preflight & doctor validation
 
 - Fail-fast preflight uses `agy models` (not a model turn) to verify exact tabular model IDs before pane creation or agent execution.
+- The model query prints an immediate startup progress line and has its own 20-second upper bound while still respecting an earlier caller cancellation. Timeout and nonzero-exit errors are actionable but never include raw command output.
 - Single invocation: when both supervisor and developer use agy, model list validation is executed only once per invocation via internal caching.
 - Diagnostics privacy: model values, full command output, credentials, instructions, and task text are never logged to diagnostics.
 - Runtime records persist effective models; developer repair and exact resume retain the stored model.
@@ -103,7 +123,7 @@ Diagnostics are enabled by default at:
 ~/Library/Application Support/herdr-tandem/state/logs/herdr-tandem.log
 ```
 
-Logs record starts, finishes, state transitions, retries, pane/agent lifecycle operations, MCP tool events, and errors while redacting plaintext prompts, answers, secrets, and credentials. Logs are bounded at 8 MiB with up to 5 rotated backups, directory mode `0700`, and file mode `0600`. Set `HERDR_TANDEM_DIAGNOSTICS=0` for an explicit single-run opt-out.
+Logs record starts, finishes, state transitions, retries, pane/agent lifecycle operations, MCP tool events, and errors while redacting plaintext prompts, answers, secrets, and credentials. Important events carry stable codes such as `HTD-MCP-002`, `HTD-MON-003`, and `HTD-MDL-003`; the complete code list and inspection command live in `AGENTS.md`. Logs are bounded at 8 MiB with up to 5 rotated backups, directory mode `0700`, and file mode `0600`. Set `HERDR_TANDEM_DIAGNOSTICS=0` for an explicit single-run opt-out.
 
 ## Testing
 

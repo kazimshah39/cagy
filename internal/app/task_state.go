@@ -211,28 +211,43 @@ func (a *App) beginTaskTracking(info runtimeContext, developer herdr.AgentInfo, 
 	if err := a.writeTaskJournal(record); err != nil {
 		return err
 	}
+	a.taskStateMu.Lock()
 	a.activeTask = &record
+	a.taskStateMu.Unlock()
 	a.debugf("task-tracking active task=%q developer=%q phase=%q", debugHashPrefix(record.TaskHash), record.Developer, record.Phase)
 	return nil
 }
 
 func (a *App) replaceTrackedPrompt(developer herdr.AgentInfo, task string, checkpoint transcript.Checkpoint, phase taskPhase) error {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
 	if a.activeTask == nil {
 		a.debugf("task-tracking replace skipped task=%q reason=%q", debugTaskFingerprint(task), "no-active-task")
 		return nil
 	}
-	a.debugf("task-tracking replace task=%q developer=%q pane=%q from_phase=%q to_phase=%q", debugTaskFingerprint(task), a.activeTask.Developer, developer.PaneID, a.activeTask.Phase, phase)
-	a.activeTask.DeveloperPaneID = developer.PaneID
-	a.activeTask.TaskHash = transcript.TaskHash(task)
-	a.activeTask.CheckpointSessionID = checkpoint.SessionID
-	a.activeTask.CompactOffset = checkpoint.Offset
-	a.activeTask.FullOffset = checkpoint.FullOffset
-	a.activeTask.Phase = phase
-	if sessionID, err := a.exactDeveloperSessionID(developer); err == nil {
-		a.activeTask.SessionID = sessionID
+	record, exists, err := a.loadTaskJournal(a.activeTask.Developer)
+	if err != nil {
+		return err
 	}
-	a.activeTask.UpdatedAt = a.now().UTC()
-	return a.writeTaskJournal(*a.activeTask)
+	if !exists {
+		return fmt.Errorf("interrupted-task state disappeared while the task was running")
+	}
+	a.debugf("task-tracking replace task=%q developer=%q pane=%q from_phase=%q to_phase=%q", debugTaskFingerprint(task), record.Developer, developer.PaneID, record.Phase, phase)
+	record.DeveloperPaneID = developer.PaneID
+	record.TaskHash = transcript.TaskHash(task)
+	record.CheckpointSessionID = checkpoint.SessionID
+	record.CompactOffset = checkpoint.Offset
+	record.FullOffset = checkpoint.FullOffset
+	record.Phase = phase
+	if sessionID, sessionErr := a.exactDeveloperSessionID(developer); sessionErr == nil {
+		record.SessionID = sessionID
+	}
+	record.UpdatedAt = a.now().UTC()
+	if err := a.writeTaskJournal(record); err != nil {
+		return err
+	}
+	a.activeTask = &record
+	return nil
 }
 
 func randomDeliveryReceipt() (string, error) {
@@ -257,30 +272,79 @@ func isValidDeliveryReceipt(receipt string) bool {
 }
 
 func (a *App) setTrackedPhase(phase taskPhase, developer herdr.AgentInfo) error {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
 	if a.activeTask == nil {
 		a.debugf("task-tracking phase skipped to=%q reason=%q", phase, "no-active-task")
 		return nil
 	}
-	previous := a.activeTask.Phase
-	a.activeTask.Phase = phase
-	if phase == taskPhaseCompleted && a.activeTask.DeliveryReceipt == "" {
-		receipt, err := randomDeliveryReceipt()
-		if err != nil {
-			return err
+	record, exists, err := a.loadTaskJournal(a.activeTask.Developer)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("interrupted-task state disappeared while the task was running")
+	}
+	if record.TaskHash != a.activeTask.TaskHash {
+		return fmt.Errorf("interrupted-task state changed while the task was running")
+	}
+	previous := record.Phase
+	record.Phase = phase
+	if phase == taskPhaseCompleted && record.DeliveryReceipt == "" {
+		receipt, receiptErr := randomDeliveryReceipt()
+		if receiptErr != nil {
+			return receiptErr
 		}
-		a.activeTask.DeliveryReceipt = receipt
+		record.DeliveryReceipt = receipt
 	}
 	if developer.PaneID != "" {
-		a.activeTask.DeveloperPaneID = developer.PaneID
+		record.DeveloperPaneID = developer.PaneID
 	}
-	// Only update SessionID when the incoming developer has a valid session.
-	if sessionID, err := a.exactDeveloperSessionID(developer); err == nil {
-		a.activeTask.SessionID = sessionID
+	if sessionID, sessionErr := a.exactDeveloperSessionID(developer); sessionErr == nil {
+		record.SessionID = sessionID
 	}
-	a.activeTask.UpdatedAt = a.now().UTC()
-	err := a.writeTaskJournal(*a.activeTask)
-	a.debugf("task-tracking phase task=%q developer=%q from=%q to=%q ok=%t error=%q", debugHashPrefix(a.activeTask.TaskHash), a.activeTask.Developer, previous, phase, err == nil, err)
+	record.UpdatedAt = a.now().UTC()
+	err = a.writeTaskJournal(record)
+	if err == nil {
+		a.activeTask = &record
+	}
+	a.debugf("task-tracking phase task=%q developer=%q from=%q to=%q ok=%t error=%q", debugHashPrefix(record.TaskHash), record.Developer, previous, phase, err == nil, err)
 	return err
+}
+
+func (a *App) trackedTaskReceipt() string {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
+	if a.activeTask == nil {
+		return ""
+	}
+	return a.activeTask.DeliveryReceipt
+}
+
+func (a *App) trackedTaskPhase() taskPhase {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
+	if a.activeTask == nil {
+		return ""
+	}
+	return a.activeTask.Phase
+}
+
+func (a *App) trackedTaskDeveloper() string {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
+	if a.activeTask == nil {
+		return ""
+	}
+	return a.activeTask.Developer
+}
+
+func (a *App) clearTrackedTask(developer string) {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
+	if a.activeTask != nil && a.activeTask.Developer == developer {
+		a.activeTask = nil
+	}
 }
 
 func (a *App) warnTrackedPhase(phase taskPhase, developer herdr.AgentInfo) {
@@ -366,6 +430,8 @@ func (a *App) journalCheckpoint(record taskJournal, sessionID string) (transcrip
 }
 
 func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
+	a.taskStateMu.Lock()
+	defer a.taskStateMu.Unlock()
 	a.debugf("task-receipt ensure begin developer=%q task=%q phase=%q receipt_present=%t", record.Developer, debugHashPrefix(record.TaskHash), record.Phase, record.DeliveryReceipt != "")
 	receipt := record.DeliveryReceipt
 	needsWrite := false
@@ -394,6 +460,10 @@ func (a *App) ensureCompletedReceipt(record *taskJournal) (string, error) {
 			a.debugf("task-receipt ensure error developer=%q task=%q error=%q", record.Developer, debugHashPrefix(record.TaskHash), err)
 			return "", fmt.Errorf("save delivery receipt for completed task: %w", err)
 		}
+	}
+	if a.activeTask != nil && a.activeTask.Developer == record.Developer && a.activeTask.TaskHash == record.TaskHash {
+		copy := *record
+		a.activeTask = &copy
 	}
 	a.debugf("task-receipt ensure success developer=%q task=%q created=%t", record.Developer, debugHashPrefix(record.TaskHash), needsWrite)
 	return receipt, nil
@@ -627,9 +697,7 @@ func (a *App) acknowledgeLockedTask(record taskJournal, receipt string, info run
 	if err := a.removeTaskJournal(info.developer); err != nil {
 		return fmt.Errorf("clear completed task state: %w", err)
 	}
-	if a.activeTask != nil && a.activeTask.Developer == info.developer {
-		a.activeTask = nil
-	}
+	a.clearTrackedTask(info.developer)
 	a.debugf("task-ack locked success developer=%q task=%q", info.developer, debugHashPrefix(record.TaskHash))
 	return nil
 }
@@ -706,8 +774,34 @@ func (a *App) getTaskStatus(ctx context.Context) (*TaskStatusOutput, error) {
 	}
 
 	elapsed := ""
+	age := time.Duration(0)
 	if !record.StartedAt.IsZero() {
-		elapsed = a.now().Sub(record.StartedAt).Round(time.Second).String()
+		age = a.now().Sub(record.StartedAt)
+		if age < 0 {
+			age = 0
+		}
+		elapsed = age.Round(time.Second).String()
+	}
+	deadline, _ := a.developerTaskTiming()
+	if record.Phase == taskPhaseUncertain && inspection.kind != taskInspectionCompleted {
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q journal_phase=%q", info.developer, debugHashPrefix(record.TaskHash), "uncertain", elapsed, record.Phase)
+		return &TaskStatusOutput{
+			Status:  "uncertain",
+			Message: "background monitoring ended without a confirmed final response; check the right pane before forgetting the task",
+			Elapsed: elapsed,
+		}, nil
+	}
+	if inspection.kind == taskInspectionUncertain && (record.Phase == taskPhaseSubmitting || record.Phase == taskPhaseMonitoring) && age < deadline {
+		status := "running"
+		if record.Phase == taskPhaseSubmitting {
+			status = "submitting"
+		}
+		a.debugf("task-status result developer=%q task=%q status=%q elapsed=%q transient=true", info.developer, debugHashPrefix(record.TaskHash), status, elapsed)
+		return &TaskStatusOutput{
+			Status:  status,
+			Message: "task was submitted and background monitoring is still active",
+			Elapsed: elapsed,
+		}, nil
 	}
 
 	switch inspection.kind {
@@ -829,9 +923,7 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 		if removeErr := a.removeTaskJournal(info.developer); removeErr != nil {
 			return nil, fmt.Errorf("discard unreadable interrupted-task state: %w", removeErr)
 		}
-		if a.activeTask != nil && a.activeTask.Developer == info.developer {
-			a.activeTask = nil
-		}
+		a.clearTrackedTask(info.developer)
 		a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 		a.debugf("task-forget success developer=%q kind=%q", info.developer, "unreadable")
 		return &ForgetTaskOutput{Status: "forgotten", Message: "forgot unreadable interrupted-task state"}, nil
@@ -850,16 +942,12 @@ func (a *App) forgetTask(ctx context.Context, confirm bool) (*ForgetTaskOutput, 
 			return nil, fmt.Errorf("refusing to forget invalid task state while the developer is still running")
 		}
 	} else if inspection.kind == taskInspectionRunning {
-		if inspection.developerRunning {
-			return nil, fmt.Errorf("refusing to forget a task that is still running")
-		}
+		return nil, fmt.Errorf("refusing to forget a task that is still running")
 	}
 	if err := a.removeTaskJournal(info.developer); err != nil {
 		return nil, err
 	}
-	if a.activeTask != nil && a.activeTask.Developer == info.developer {
-		a.activeTask = nil
-	}
+	a.clearTrackedTask(info.developer)
 	a.warnSidebarTransition(ctx, mode, info, runtimeRecord.DeveloperPaneID, sidebarRepresentativeSupervisor)
 	a.debugf("task-forget success developer=%q task=%q kind=%q", info.developer, debugHashPrefix(record.TaskHash), "normal")
 	return &ForgetTaskOutput{Status: "forgotten", Message: "forgot interrupted-task state"}, nil

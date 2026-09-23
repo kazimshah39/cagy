@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	buildmeta "github.com/kazimshah39/herdr-tandem/internal/buildinfo"
@@ -39,11 +40,13 @@ const (
 const supervisorPrompt = `You are the supervisor. The visible agy agent in the right Herdr pane is the developer.
 Delegate implementation work using the native herdr-tandem MCP tools. Follow this exact workflow:
 1. Inspect task state with task_status before starting new work.
-2. Delegate the task with delegate_task(task="..."). Task text is sent literally without shell interpolation.
-3. Review the developer's changes, test execution, correctness, and security.
-4. Call acknowledge_task(receipt="...") only after the result is received and in context.
-5. The configured provider service owns provider accounts and quota fallback. Do not ask the user to switch accounts or restart agy after a quota event; report a visible provider failure only after the service has exhausted its configured fallback.
-6. If a session or tool call is interrupted, use recover_task to retrieve the completed answer without resubmitting.
+2. Submit the task once with delegate_task(task="..."). Task text is sent literally without shell interpolation. delegate_task returns after submission; it does not return the final answer.
+3. Poll task_status at reasonable intervals while status is submitting or running. Do not call delegate_task again for the same work. Never end a turn by saying the developer will report back; no developer-to-supervisor report exists.
+4. When status is completed_unacknowledged, call recover_task to receive the exact final answer and receipt.
+5. Review the developer's changes, test execution, correctness, and security.
+6. Call acknowledge_task(receipt="...") only after the recovered result is received and in context.
+7. The configured provider service owns provider accounts and quota fallback. Do not ask the user to switch accounts or restart agy after a quota event; report a visible provider failure only after the service has exhausted its configured fallback.
+8. If a session or tool call is interrupted, resume with task_status and recover_task without resubmitting. The local monitor may send a fixed terminal-state wake message; when it does, call task_status immediately.
 Shell CLI commands (such as herdr-tandem ask --stdin) are for emergency manual use only; always prefer the native MCP tools. Do not edit the same files while agy is working. Use current official web documentation for dependencies and external APIs. Give the final result to the user in clear, simple words.`
 
 func supervisorInstructions(now time.Time) string {
@@ -63,6 +66,8 @@ type App struct {
 	environ                 func() []string
 	stateDir                string
 	activeTask              *taskJournal
+	taskStateMu             sync.Mutex
+	monitorWG               sync.WaitGroup
 	token                   func() (string, error)
 	now                     func() time.Time
 	transcriptRoot          string
@@ -77,6 +82,13 @@ type App struct {
 	agentStopTimeout        time.Duration
 	agentStopEscalation     time.Duration
 	developerReadyTimeout   time.Duration
+	agyModelsTimeout        time.Duration
+	mcpSubmissionTimeout    time.Duration
+	mcpInitialPromptWait    time.Duration
+	supervisorNotifyTimeout time.Duration
+	supervisorNotifyPoll    time.Duration
+	supervisorNotifyWait    time.Duration
+	supervisorNotifyDelay   time.Duration
 	setSidebarView          func(context.Context) error
 	clearSidebarView        func(context.Context) error
 	reportSidebarVisibility func(context.Context, string, herdr.PaneVisibility) error
@@ -97,33 +109,40 @@ type App struct {
 func New(runner proc.Runner, stdout, stderr io.Writer) *App {
 	herdrClient := herdr.New(runner)
 	application := &App{
-		supervisor:            supervisor.Codex{},
-		developerAdapter:      developer.Agy{},
-		runner:                runner,
-		herdr:                 herdrClient,
-		stdin:                 os.Stdin,
-		stdout:                stdout,
-		stderr:                stderr,
-		getenv:                os.Getenv,
-		environ:               os.Environ,
-		stateDir:              defaultStateDir(),
-		token:                 randomToken,
-		now:                   time.Now,
-		transcriptRoot:        developer.Agy{}.TranscriptRoot(),
-		transcriptWait:        3 * time.Second,
-		missingTranscriptWait: 30 * time.Second,
-		developerPoll:         time.Second,
-		initialPromptWait:     30 * time.Second,
-		healthyStallWindow:    150 * time.Second,
-		heartbeatInterval:     5 * time.Minute,
-		taskDeadline:          30 * time.Minute,
-		cancellationIdleWait:  30 * time.Second,
-		agentStopTimeout:      15 * time.Second,
-		agentStopEscalation:   1500 * time.Millisecond,
-		developerReadyTimeout: time.Duration(developerReadyTimeoutMS) * time.Millisecond,
-		checkPlatform:         platform.Current,
-		runningBuild:          buildmeta.Running,
-		installedBuild:        buildmeta.ReadFile,
+		supervisor:              supervisor.Codex{},
+		developerAdapter:        developer.Agy{},
+		runner:                  runner,
+		herdr:                   herdrClient,
+		stdin:                   os.Stdin,
+		stdout:                  stdout,
+		stderr:                  stderr,
+		getenv:                  os.Getenv,
+		environ:                 os.Environ,
+		stateDir:                defaultStateDir(),
+		token:                   randomToken,
+		now:                     time.Now,
+		transcriptRoot:          developer.Agy{}.TranscriptRoot(),
+		transcriptWait:          3 * time.Second,
+		missingTranscriptWait:   30 * time.Second,
+		developerPoll:           time.Second,
+		initialPromptWait:       30 * time.Second,
+		healthyStallWindow:      150 * time.Second,
+		heartbeatInterval:       5 * time.Minute,
+		taskDeadline:            30 * time.Minute,
+		cancellationIdleWait:    30 * time.Second,
+		agentStopTimeout:        15 * time.Second,
+		agentStopEscalation:     1500 * time.Millisecond,
+		developerReadyTimeout:   time.Duration(developerReadyTimeoutMS) * time.Millisecond,
+		agyModelsTimeout:        20 * time.Second,
+		mcpSubmissionTimeout:    90 * time.Second,
+		mcpInitialPromptWait:    5 * time.Second,
+		supervisorNotifyTimeout: 30 * time.Minute,
+		supervisorNotifyPoll:    time.Second,
+		supervisorNotifyWait:    5 * time.Second,
+		supervisorNotifyDelay:   500 * time.Millisecond,
+		checkPlatform:           platform.Current,
+		runningBuild:            buildmeta.Running,
+		installedBuild:          buildmeta.ReadFile,
 	}
 	herdrClient.SetDiagnostic(application.debugf)
 	application.resolveExecutable = func() (string, error) {

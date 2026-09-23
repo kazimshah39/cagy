@@ -73,8 +73,11 @@ Read `project-structure.md` before architecture changes and update it when a dec
 ## Supervisor Workflow
 
 - The user talks to the selected supervisor.
-- Codex or OpenCode delegates implementation using native herdr-tandem MCP tools (`delegate_task`, `task_status`, `acknowledge_task`, `recover_task`). Tasks arrive literally without shell interpolation.
-- Completed task output requires explicit receipt acknowledgment via `acknowledge_task`.
+- Codex, OpenCode, or agy delegates implementation using native herdr-tandem MCP tools (`delegate_task`, `task_status`, `recover_task`, `acknowledge_task`). Tasks arrive literally without shell interpolation.
+- `delegate_task` submits exactly once and returns after submission. A bounded monitor inside the stdio MCP process continues for up to 30 minutes; this is not a daemon, queue, or persistent worker.
+- The supervisor polls `task_status`, calls `recover_task` only after `completed_unacknowledged`, reviews the result, and then calls `acknowledge_task` with the returned receipt. It must never claim that the developer will report back automatically.
+- After the durable journal reaches `completed_unacknowledged`, `blocked`, or `uncertain`, the local monitor waits for the verified supervisor agent to become idle and submits one fixed terminal-state wake prompt. MCP startup repeats this recovery check for terminal journal state left by an earlier process. The wake prompt contains no task text, answer, receipt, or developer-controlled content.
+- Never keep an MCP request open for the full developer task and never depend on a client-specific long MCP timeout.
 - agy is not a native supervisor subagent; the selected supervisor interacts with agy through the local stdio MCP bridge.
 - No global supervisor configuration or plugin is installed by Herdr Tandem.
 - Already-running supervisor sessions must be restarted (`herdr-tandem stop` followed by `herdr-tandem`) to receive the per-invocation MCP bridge.
@@ -101,9 +104,30 @@ The watchdog monitors prompt readiness, healthy-task stalls, heartbeats, and the
 ## Temporary Reliability Diagnostics
 
 - During the current September 2026 real-work validation period, keep detailed diagnostics enabled by default at `~/Library/Application Support/herdr-tandem/state/logs/herdr-tandem.log`.
+- Read the active log with `tail -F "$HOME/Library/Application Support/herdr-tandem/state/logs/herdr-tandem.log"`. Rotated files use `.1` through `.5`.
 - Log important starts, finishes, state transitions, retries, pane/agent lifecycle operations, MCP tool lifecycles, durable-journal actions, and errors. Avoid noisy per-second duplicates; log visible state changes and bounded heartbeats instead.
 - Keep logs bounded at 8 MiB with five backups, directory mode `0700`, and file mode `0600`. `HERDR_TANDEM_DIAGNOSTICS=0` is the explicit one-run opt-out.
 - Never log task plaintext, completed answer text, delivery receipt values, authorization codes, credentials, provider command output, complete transcripts, or full environments. Use task hashes, byte counts, booleans, and short state labels.
+- Important diagnostic events must include a stable `code=HTD-<AREA>-<NUMBER>` field so future investigations can grep one lifecycle across rotated logs. Do not reuse a code for a different meaning.
+
+### Diagnostic codes
+
+| Code | Meaning |
+| --- | --- |
+| `HTD-MCP-001` | `delegate_task` request accepted for validation and submission. |
+| `HTD-MCP-002` | Task was submitted exactly once and background monitoring started. |
+| `HTD-MON-001` | Developer prompt submission started. |
+| `HTD-MON-002` | Bounded background monitor started. |
+| `HTD-MON-003` | Exact matching transcript response was confirmed and saved. |
+| `HTD-MON-004` | Developer entered a blocked state. |
+| `HTD-MON-005` | Monitoring ended without confirmed completion, including deadline or cancellation. |
+| `HTD-SUP-001` | A terminal task state started the verified supervisor wake flow. |
+| `HTD-SUP-002` | The fixed terminal-state wake prompt was submitted to the idle supervisor. |
+| `HTD-SUP-003` | The supervisor wake was skipped, timed out, or failed validation/submission. |
+| `HTD-MDL-001` | Bounded `agy models` capability check started. |
+| `HTD-MDL-002` | `agy models` capability check succeeded. |
+| `HTD-MDL-003` | `agy models` capability check reached its dedicated timeout. |
+| `HTD-MDL-004` | `agy models` failed or its parent operation was cancelled. |
 
 ## Testing
 

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	dev "github.com/kazimshah39/herdr-tandem/internal/developer"
 	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
@@ -43,16 +45,47 @@ func (a *App) loadAgyModels(ctx context.Context) (map[string]struct{}, error) {
 		return a.availableAgyModels, a.availableAgyModelsErr
 	}
 	a.agyModelsChecked = true
-	result, err := a.runner.Run(ctx, a.developerAdapter.Executable(), "models")
+	if err := ctx.Err(); err != nil {
+		a.availableAgyModelsErr = fmt.Errorf("query agy available models: %w", err)
+		return nil, a.availableAgyModelsErr
+	}
+
+	timeout := a.agyModelsTimeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	if a.stderr != nil {
+		fmt.Fprintf(a.stderr, "herdr-tandem: checking available agy models (timeout %s)\n", timeout.Round(time.Second))
+	}
+	a.debugf("code=HTD-MDL-001 agy-models begin timeout=%s", timeout)
+	started := time.Now()
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := a.runner.Run(queryCtx, a.developerAdapter.Executable(), "models")
+	elapsed := time.Since(started).Round(time.Millisecond)
+
+	if parentErr := ctx.Err(); parentErr != nil {
+		a.debugf("code=HTD-MDL-004 agy-models parent-cancelled elapsed=%s error=%q", elapsed, parentErr)
+		a.availableAgyModelsErr = fmt.Errorf("query agy available models: %w", parentErr)
+		return nil, a.availableAgyModelsErr
+	}
+	if errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
+		a.debugf("code=HTD-MDL-003 agy-models timeout elapsed=%s limit=%s", elapsed, timeout)
+		a.availableAgyModelsErr = fmt.Errorf("agy models check timed out after %s; run 'agy models' directly, then retry herdr-tandem", timeout.Round(time.Second))
+		return nil, a.availableAgyModelsErr
+	}
 	if err != nil {
+		a.debugf("code=HTD-MDL-004 agy-models runner-error elapsed=%s error_type=%T", elapsed, err)
 		a.availableAgyModelsErr = fmt.Errorf("failed to query agy available models: %w", err)
 		return nil, a.availableAgyModelsErr
 	}
 	if result.ExitCode != 0 {
-		a.availableAgyModelsErr = fmt.Errorf("agy models command exited with status %d", result.ExitCode)
+		a.debugf("code=HTD-MDL-004 agy-models nonzero-exit elapsed=%s exit_code=%d stderr_bytes=%d", elapsed, result.ExitCode, len(result.Stderr))
+		a.availableAgyModelsErr = fmt.Errorf("agy models command exited with status %d; run 'agy models' directly for details", result.ExitCode)
 		return nil, a.availableAgyModelsErr
 	}
 	a.availableAgyModels = parseAgyModelsOutput(result.Stdout)
+	a.debugf("code=HTD-MDL-002 agy-models success elapsed=%s model_count=%d stdout_bytes=%d", elapsed, len(a.availableAgyModels), len(result.Stdout))
 	return a.availableAgyModels, nil
 }
 

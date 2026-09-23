@@ -67,7 +67,7 @@ Herdr Tandem intentionally pins explicit model versions in code constants (`clau
 
 ### Capability preflight & doctor validation
 
-- **Start preflight:** Before creating panes or starting agents, `herdr-tandem` performs a fail-fast capability check using `agy models` (verifying exact tabular model IDs without initiating a model turn or consuming quota). When both supervisor and developer use agy, model list validation is executed only once per invocation.
+- **Start preflight:** Before creating panes or starting agents, `herdr-tandem` prints a progress message and performs a fail-fast capability check using `agy models` (verifying exact tabular model IDs without initiating a model turn or consuming quota). The query has a dedicated 20-second upper bound. When both supervisor and developer use agy, model list validation is executed only once per invocation.
 - **Doctor check:** `herdr-tandem doctor` validates that the effective developer model is available, and if `--supervisor agy` is selected, also validates that the effective supervisor model is available.
 - **Runtime persistence & repair:** The effective models are persisted in the runtime record and retained during developer repair and exact session resumption.
 
@@ -104,18 +104,20 @@ Herdr currently supports one transient Agent view per server. Herdr Tandem uses 
 2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state` with the selected sidebar mode.
 3. It creates a visible right-hand developer pane, validates agy startup readiness within a 60-second window (accepting project trust if shown), and applies project-specific ownership, label, and visibility metadata.
 4. It starts Codex, OpenCode, or agy in the current pane with a local stdio MCP bridge. When agy is the supervisor, a temporary runtime-owned custom agent (`~/.gemini/config/agents/herdr-tandem-<runtime-id>/agent.md`) is prepared failure-atomically with `0700` directories and `0600` file permissions to supply the stdio MCP bridge and supervisor instructions without persistent global configuration; this artifact is unconditionally removed when the session exits or is stopped.
-5. The supervisor delegates implementation work through `delegate_task`, receiving the completed transcript answer alongside a delivery receipt (`completed_unacknowledged`).
-6. The supervisor calls `acknowledge_task(receipt="...")` after reviewing the output. If a session or command is interrupted, `task_status` indicates when recovery is possible and `recover_task` retrieves the answer and receipt without resubmitting the prompt.
-7. The provider service owns account selection, quota handling, and fallback.
+5. The supervisor submits implementation work once through `delegate_task`. The call returns after bounded submission while the stdio MCP process monitors the developer for up to 30 minutes.
+6. The supervisor polls `task_status`. When the journal reaches a terminal state, the local monitor also waits for the verified supervisor to become idle and sends one fixed wake prompt so an idle supervisor cannot remain unaware of completion. A restarted MCP bridge repeats this check for pending terminal state.
+7. When `task_status` reports `completed_unacknowledged`, `recover_task` returns the exact transcript answer and delivery receipt without resubmitting.
+8. After reviewing the output, the supervisor calls `acknowledge_task(receipt="...")` to clear durable task state.
+9. The provider service owns account selection, quota handling, and fallback.
 
 Each supervisor pane has its own runtime. A duplicate start from the same Herdr pane is rejected. When the foreground supervisor exits, running `herdr-tandem stop` in the pane automatically discovers the project runtime to clean up any temporary supervisor artifacts, stop the developer pane, and remove the runtime record.
 
 ## Safety
 
-- No tmux, daemon, listener, hidden worker, queue, or web UI is used.
+- No tmux, daemon, listener, persistent worker, queue, or web UI is used. The only background work is the bounded monitor inside the existing stdio MCP child process.
 - Process arguments are passed as arrays; prompts and paths are never shell-interpolated.
 - State files are private (`0700` directories and `0600` files).
-- Diagnostics never contain prompts, answers, credentials, service secrets, or complete transcripts.
+- Diagnostics never contain task prompts, answers, receipts, credentials, service secrets, or complete transcripts. The terminal-state supervisor wake is fixed internal text and never includes developer-controlled content. Diagnostics are stored in `~/Library/Application Support/herdr-tandem/state/logs/herdr-tandem.log`, rotated at 8 MiB, and include stable `HTD-*` event codes documented in `AGENTS.md`.
 - Sidebar metadata is written only on lifecycle transitions, not on every watchdog poll.
 - Automated tests never launch real agents or consume model quota.
 

@@ -98,3 +98,34 @@ func TestReadTaskInputPreservesLiteralShellText(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTrackedCompletionPreservesAlreadyPersistedRecoveryReceipt(t *testing.T) {
+	app := New(fakeRunner{}, nil, nil)
+	app.stateDir = t.TempDir()
+	info := runtimeContext{supervisorKind: "codex", developerKind: "agy", workspaceID: "w1", supervisor: "w1:p1", developer: "developer", project: filepath.Clean(t.TempDir())}
+	developer := herdr.AgentInfo{
+		Agent: "agy", PaneID: "w1:p2",
+		AgentSession: &herdr.AgentSessionInfo{Source: "herdr:antigravity_cli", Agent: "agy", Kind: "id", Value: taskTestConversationID},
+	}
+	if err := app.beginTaskTracking(info, developer, "receipt race task", transcript.Checkpoint{SessionID: taskTestConversationID}, taskPhaseMonitoring); err != nil {
+		t.Fatal(err)
+	}
+	record, exists, err := app.loadTaskJournal(info.developer)
+	if err != nil || !exists {
+		t.Fatalf("load record exists=%t err=%v", exists, err)
+	}
+	receipt, err := app.ensureCompletedReceipt(&record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.setTrackedPhase(taskPhaseCompleted, developer); err != nil {
+		t.Fatal(err)
+	}
+	updated, exists, err := app.loadTaskJournal(info.developer)
+	if err != nil || !exists {
+		t.Fatalf("reload record exists=%t err=%v", exists, err)
+	}
+	if updated.DeliveryReceipt != receipt {
+		t.Fatalf("receipt changed during finalization: got %q want %q", updated.DeliveryReceipt, receipt)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	dev "github.com/kazimshah39/herdr-tandem/internal/developer"
 	"github.com/kazimshah39/herdr-tandem/internal/herdr"
 	"github.com/kazimshah39/herdr-tandem/internal/supervisor"
+	"github.com/kazimshah39/herdr-tandem/internal/transcript"
 )
 
 func (a *App) start(ctx context.Context, path string, mode sidebarMode) (runErr error) {
@@ -441,7 +442,16 @@ type taskDelivery struct {
 	receipt   string
 }
 
-func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, error) {
+type managedTask struct {
+	task          string
+	info          runtimeContext
+	mode          sidebarMode
+	checkpoint    transcript.Checkpoint
+	submission    developerTaskSubmission
+	developerPane string
+}
+
+func (a *App) beginManagedTask(ctx context.Context, task string, promptWait time.Duration) (*managedTask, error) {
 	taskID := debugTaskFingerprint(task)
 	a.debugf("task delegate begin task=%q bytes=%d", taskID, len(task))
 	info, err := a.context()
@@ -485,18 +495,49 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	if err := a.beginTaskTracking(info, developer, task, checkpoint, taskPhaseSubmitting); err != nil {
 		return nil, fmt.Errorf("prepare durable task state: %w", err)
 	}
-	completed := false
 	developerPane := developer.PaneID
 	a.warnSidebarTransition(ctx, mode, info, developerPane, sidebarRepresentativeDeveloper)
+	submission, taskErr := a.submitDeveloperTaskWithWait(ctx, info.developer, task, checkpoint, promptWait)
+	if submission.agent.PaneID != "" {
+		developerPane = submission.agent.PaneID
+	}
+	if taskErr != nil {
+		a.warnTrackedPhase(taskPhaseUncertain, submission.agent)
+		a.reconcileSidebarAfterManagedTask(ctx, mode, info, developerPane, false)
+		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("agy task submission stopped, but the visible developer may still be running; run herdr-tandem doctor: %w", taskErr)
+		}
+		return nil, fmt.Errorf("agy task submission failed; run herdr-tandem doctor before sending another task: %w", taskErr)
+	}
+	if submission.agent.AgentStatus == "blocked" {
+		a.warnTrackedPhase(taskPhaseBlocked, submission.agent)
+		a.reconcileSidebarAfterManagedTask(ctx, mode, info, developerPane, false)
+		return nil, fmt.Errorf("developer is blocked; check the right pane")
+	}
+	return &managedTask{
+		task:          task,
+		info:          info,
+		mode:          mode,
+		checkpoint:    checkpoint,
+		submission:    submission,
+		developerPane: developerPane,
+	}, nil
+}
+
+func (a *App) finishManagedTask(ctx context.Context, task *managedTask) (*taskDelivery, error) {
+	completed := false
+	developerPane := task.developerPane
 	defer func() {
-		a.reconcileSidebarAfterManagedTask(ctx, mode, info, developerPane, completed)
+		a.reconcileSidebarAfterManagedTask(ctx, task.mode, task.info, developerPane, completed)
 	}()
-	result, taskErr := a.runDeveloperTask(ctx, info.developer, task, checkpoint)
+
+	result, taskErr := a.monitorDeveloperTask(ctx, task.info.developer, task.task, task.checkpoint, task.submission.agent, task.submission.remaining)
 	if result.agent.PaneID != "" {
 		developerPane = result.agent.PaneID
 	}
 	if taskErr != nil {
 		a.warnTrackedPhase(taskPhaseUncertain, result.agent)
+		a.debugf("code=HTD-MON-005 managed-task monitor-failed task=%q error=%q", debugTaskFingerprint(task.task), taskErr)
 		if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("agy task monitoring stopped, but the visible developer may still be running; run herdr-tandem doctor: %w", taskErr)
 		}
@@ -505,6 +546,7 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 	a.warnIfDeveloperSessionNotPersisted(ctx, result.agent)
 	if result.agent.AgentStatus == "blocked" {
 		a.warnTrackedPhase(taskPhaseBlocked, result.agent)
+		a.debugf("code=HTD-MON-004 managed-task blocked task=%q", debugTaskFingerprint(task.task))
 		return nil, fmt.Errorf("developer is blocked; check the right pane")
 	}
 	if strings.TrimSpace(result.output) == "" {
@@ -515,11 +557,57 @@ func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, err
 		return nil, fmt.Errorf("save completed task state before delivering output: %w", err)
 	}
 	completed = true
-	receipt := ""
-	if a.activeTask != nil {
-		receipt = a.activeTask.DeliveryReceipt
-	}
+	receipt := a.trackedTaskReceipt()
+	a.debugf("code=HTD-MON-003 managed-task completed task=%q answer_bytes=%d receipt_present=%t", debugTaskFingerprint(task.task), len(result.output), receipt != "")
 	return &taskDelivery{output: strings.TrimSpace(result.output), developer: result.agent, receipt: receipt}, nil
+}
+
+func (a *App) delegateTask(ctx context.Context, task string) (*taskDelivery, error) {
+	managed, err := a.beginManagedTask(ctx, task, 0)
+	if err != nil {
+		return nil, err
+	}
+	return a.finishManagedTask(ctx, managed)
+}
+
+func (a *App) delegateTaskAsync(ctx context.Context, task string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timeout := a.mcpSubmissionTimeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	submitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	promptWait := a.mcpInitialPromptWait
+	if promptWait <= 0 {
+		promptWait = 5 * time.Second
+	}
+	managed, err := a.beginManagedTask(submitCtx, task, promptWait)
+	if err != nil {
+		return err
+	}
+	a.debugf("code=HTD-MCP-002 async-delegation accepted task=%q remaining=%s", debugTaskFingerprint(task), managed.submission.remaining)
+	a.monitorWG.Add(1)
+	go func() {
+		defer a.monitorWG.Done()
+		monitorGrace := 5 * time.Second
+		monitorCtx, monitorCancel := context.WithTimeout(context.Background(), managed.submission.remaining+monitorGrace)
+		defer monitorCancel()
+		if _, monitorErr := a.finishManagedTask(monitorCtx, managed); monitorErr != nil {
+			a.debugf("code=HTD-MON-005 async-delegation finished-with-error task=%q error=%q", debugTaskFingerprint(task), monitorErr)
+		}
+		record, exists, loadErr := a.loadTaskJournal(managed.info.developer)
+		if loadErr != nil || !exists || !isTerminalTaskPhase(record.Phase) {
+			a.debugf("code=HTD-SUP-003 supervisor-wake skipped task=%q phase=%q exists=%t error=%q", debugTaskFingerprint(task), record.Phase, exists, loadErr)
+			return
+		}
+		if notifyErr := a.notifySupervisorTaskTerminal(managed.info, record.TaskHash, record.Phase); notifyErr != nil {
+			a.debugf("code=HTD-SUP-003 supervisor-wake failed task=%q phase=%q error=%q", debugTaskFingerprint(task), record.Phase, notifyErr)
+		}
+	}()
+	return nil
 }
 
 func (a *App) ask(ctx context.Context, task string) error {
@@ -535,7 +623,7 @@ func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo, rec
 		a.warnTrackedPhase(taskPhaseUncertain, developer)
 		return fmt.Errorf("agy finished without readable output")
 	}
-	if a.activeTask == nil || a.activeTask.Phase != taskPhaseCompleted {
+	if a.trackedTaskPhase() != taskPhaseCompleted {
 		if err := a.setTrackedPhase(taskPhaseCompleted, developer); err != nil {
 			return fmt.Errorf("save completed task state before delivering output: %w", err)
 		}
@@ -543,8 +631,8 @@ func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo, rec
 	receipt := ""
 	if len(receiptOverride) > 0 && receiptOverride[0] != "" {
 		receipt = receiptOverride[0]
-	} else if a.activeTask != nil {
-		receipt = a.activeTask.DeliveryReceipt
+	} else {
+		receipt = a.trackedTaskReceipt()
 	}
 	if _, err := fmt.Fprintln(a.stdout, output); err != nil {
 		return fmt.Errorf("write agy response; recover it with herdr-tandem ask --recover: %w", err)
@@ -553,11 +641,11 @@ func (a *App) deliverTrackedOutput(output string, developer herdr.AgentInfo, rec
 		if err := a.acknowledgeTask(context.Background(), receipt); err != nil {
 			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run herdr-tandem doctor before new work: %w", err)
 		}
-	} else if a.activeTask != nil {
-		if err := a.removeTaskJournal(a.activeTask.Developer); err != nil {
+	} else if trackedDeveloper := a.trackedTaskDeveloper(); trackedDeveloper != "" {
+		if err := a.removeTaskJournal(trackedDeveloper); err != nil {
 			return fmt.Errorf("agy answer was delivered, but durable task state could not be cleared; run herdr-tandem doctor before new work: %w", err)
 		}
-		a.activeTask = nil
+		a.clearTrackedTask(trackedDeveloper)
 	}
 	return nil
 }

@@ -11,10 +11,8 @@ type DelegateTaskInput struct {
 }
 
 type DelegateTaskOutput struct {
-	Status                  string `json:"status"`
-	Answer                  string `json:"answer"`
-	Receipt                 string `json:"receipt"`
-	AcknowledgementRequired bool   `json:"acknowledgement_required"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 type TaskStatusInput struct{}
@@ -37,7 +35,7 @@ type RecoverTaskOutput struct {
 }
 
 type AcknowledgeTaskInput struct {
-	Receipt string `json:"receipt" jsonschema:"the delivery receipt from delegate_task or recover_task"`
+	Receipt string `json:"receipt" jsonschema:"the delivery receipt from recover_task"`
 }
 
 type AcknowledgeTaskOutput struct {
@@ -80,7 +78,7 @@ func (a *App) newMCPServer() *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delegate_task",
-		Description: "Delegate an implementation task to the visible agy developer in Herdr",
+		Description: "Submit one implementation task to the visible agy developer; returns after submission while monitoring continues in the MCP process",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: boolPtr(false),
@@ -145,6 +143,7 @@ func (a *App) newMCPServer() *mcp.Server {
 func (a *App) serveMCP(ctx context.Context) error {
 	a.debugf("mcp server begin transport=%q", "stdio")
 	server := a.newMCPServer()
+	a.schedulePendingSupervisorWake()
 	err := server.Run(ctx, &mcp.StdioTransport{})
 	a.debugf("mcp server end ok=%t error=%q", err == nil, err)
 	return err
@@ -152,22 +151,19 @@ func (a *App) serveMCP(ctx context.Context) error {
 
 func (a *App) handleMCPDelegateTask(ctx context.Context, req *mcp.CallToolRequest, in DelegateTaskInput) (*mcp.CallToolResult, DelegateTaskOutput, error) {
 	taskID := debugTaskFingerprint(in.Task)
-	a.debugf("mcp tool begin name=%q task=%q bytes=%d", "delegate_task", taskID, len(in.Task))
+	a.debugf("code=HTD-MCP-001 mcp tool begin name=%q task=%q bytes=%d", "delegate_task", taskID, len(in.Task))
 	if err := validateTaskString(in.Task); err != nil {
 		a.debugf("mcp tool end name=%q task=%q ok=false stage=%q error=%q", "delegate_task", taskID, "validate", err)
 		return nil, DelegateTaskOutput{}, err
 	}
-	delivery, err := a.delegateTask(ctx, in.Task)
-	if err != nil {
-		a.debugf("mcp tool end name=%q task=%q ok=false stage=%q error=%q", "delegate_task", taskID, "delegate", err)
+	if err := a.delegateTaskAsync(ctx, in.Task); err != nil {
+		a.debugf("mcp tool end name=%q task=%q ok=false stage=%q error=%q", "delegate_task", taskID, "submit", err)
 		return nil, DelegateTaskOutput{}, err
 	}
-	a.debugf("mcp tool end name=%q task=%q ok=true status=%q answer_bytes=%d receipt_present=%t", "delegate_task", taskID, "completed_unacknowledged", len(delivery.output), delivery.receipt != "")
+	a.debugf("code=HTD-MCP-002 mcp tool end name=%q task=%q ok=true status=%q", "delegate_task", taskID, "running")
 	return nil, DelegateTaskOutput{
-		Status:                  "completed_unacknowledged",
-		Answer:                  delivery.output,
-		Receipt:                 delivery.receipt,
-		AcknowledgementRequired: true,
+		Status:  "running",
+		Message: "task submitted exactly once; poll task_status until completion, then call recover_task",
 	}, nil
 }
 

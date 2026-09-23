@@ -26,8 +26,12 @@ type developerTaskResult struct {
 	output string
 }
 
-func (a *App) runDeveloperTask(ctx context.Context, target, task string, checkpoint transcript.Checkpoint) (developerTaskResult, error) {
-	taskID := debugTaskFingerprint(task)
+type developerTaskSubmission struct {
+	agent     herdr.AgentInfo
+	remaining time.Duration
+}
+
+func (a *App) developerTaskTiming() (time.Duration, time.Duration) {
 	deadline := a.taskDeadline
 	if deadline <= 0 {
 		deadline = defaultTaskDeadline
@@ -36,35 +40,64 @@ func (a *App) runDeveloperTask(ctx context.Context, target, task string, checkpo
 	if initialWait <= 0 {
 		initialWait = defaultInitialPromptWait
 	}
-	a.debugf("watchdog task-start task=%q target=%q deadline=%s initial_wait=%s", taskID, target, deadline, initialWait)
-	taskCtx, cancel := context.WithTimeout(ctx, deadline)
-	defer cancel()
+	return deadline, initialWait
+}
 
-	fmt.Fprintln(a.stderr, "herdr-tandem: submitting one task to the visible agy developer; monitoring will continue for up to 30 minutes")
-	settled, waitErr := a.herdr.Prompt(taskCtx, target, task, durationMS(initialWait))
+func (a *App) submitDeveloperTask(ctx context.Context, target, task string, checkpoint transcript.Checkpoint) (developerTaskSubmission, error) {
+	_, initialWait := a.developerTaskTiming()
+	return a.submitDeveloperTaskWithWait(ctx, target, task, checkpoint, initialWait)
+}
+
+func (a *App) submitDeveloperTaskWithWait(ctx context.Context, target, task string, checkpoint transcript.Checkpoint, initialWait time.Duration) (developerTaskSubmission, error) {
+	taskID := debugTaskFingerprint(task)
+	deadline, defaultInitialWait := a.developerTaskTiming()
+	if initialWait <= 0 {
+		initialWait = defaultInitialWait
+	}
+	if initialWait > deadline {
+		initialWait = deadline
+	}
+	started := time.Now()
+	a.debugf("code=HTD-MON-001 watchdog submit-begin task=%q target=%q deadline=%s initial_wait=%s", taskID, target, deadline, initialWait)
+	if a.stderr != nil {
+		fmt.Fprintln(a.stderr, "herdr-tandem: submitting one task to the visible agy developer; background monitoring will continue for up to 30 minutes")
+	}
+	settled, waitErr := a.herdr.Prompt(ctx, target, task, durationMS(initialWait))
 	a.debugf("watchdog prompt-result task=%q status=%q pane=%q error=%q", taskID, settled.AgentStatus, settled.PaneID, waitErr)
 	if waitErr != nil && !herdr.IsCode(waitErr, "timeout") && !herdr.IsCode(waitErr, "agent_prompt_stalled") {
-		return developerTaskResult{}, waitErr
+		return developerTaskSubmission{}, waitErr
 	}
 
-	current, err := a.transcriptAgent(taskCtx, target, settled)
+	current, err := a.transcriptAgent(ctx, target, settled)
 	if err != nil {
-		return developerTaskResult{}, err
+		return developerTaskSubmission{}, err
 	}
 	a.debugf("watchdog transcript-agent task=%q status=%q has_session=%t", taskID, current.AgentStatus, current.AgentSession != nil)
 	if current.AgentStatus == "blocked" {
 		a.warnTrackedPhase(taskPhaseBlocked, current)
-		return developerTaskResult{agent: current}, nil
+		return developerTaskSubmission{agent: current}, nil
 	}
 	a.warnTrackedPhase(taskPhaseMonitoring, current)
-	remaining := deadline
-	if herdr.IsCode(waitErr, "timeout") {
-		remaining -= initialWait
-		if remaining < 0 {
-			remaining = 0
-		}
+	remaining := deadline - time.Since(started)
+	if remaining < 0 {
+		remaining = 0
 	}
-	return a.monitorDeveloperTask(taskCtx, target, task, checkpoint, current, remaining)
+	return developerTaskSubmission{agent: current, remaining: remaining}, nil
+}
+
+func (a *App) runDeveloperTask(ctx context.Context, target, task string, checkpoint transcript.Checkpoint) (developerTaskResult, error) {
+	deadline, _ := a.developerTaskTiming()
+	taskCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+
+	submission, err := a.submitDeveloperTask(taskCtx, target, task, checkpoint)
+	if err != nil {
+		return developerTaskResult{}, err
+	}
+	if submission.agent.AgentStatus == "blocked" {
+		return developerTaskResult{agent: submission.agent}, nil
+	}
+	return a.monitorDeveloperTask(taskCtx, target, task, checkpoint, submission.agent, submission.remaining)
 }
 
 // monitorDeveloperTask requires both a stable real idle footer and the exact
@@ -106,7 +139,7 @@ func (a *App) monitorDeveloperTask(
 	elapsed := time.Duration(0)
 	tracker := NewProgressTracker(nil)
 	lastVisibleState := ""
-	a.debugf("watchdog monitor-begin task=%q target=%q remaining=%s poll=%s stall=%s", taskID, target, remaining, poll, stallWindow)
+	a.debugf("code=HTD-MON-002 watchdog monitor-begin task=%q target=%q remaining=%s poll=%s stall=%s", taskID, target, remaining, poll, stallWindow)
 	progressCheckpoint := checkpoint
 	if progressCheckpoint.Path == "" && current.AgentSession != nil {
 		if paths, err := transcript.PathsFor(a.transcriptRoot, transcript.Ref{Source: current.AgentSession.Source, Agent: current.AgentSession.Agent, Kind: current.AgentSession.Kind, Value: current.AgentSession.Value}); err == nil {
@@ -166,7 +199,7 @@ func (a *App) monitorDeveloperTask(
 					return developerTaskResult{}, transcriptErr
 				}
 				if state.Found {
-					a.debugf("watchdog transcript-complete task=%q response_bytes=%d elapsed=%s", taskID, len(state.Response), elapsed)
+					a.debugf("code=HTD-MON-003 watchdog transcript-complete task=%q response_bytes=%d elapsed=%s", taskID, len(state.Response), elapsed)
 					return developerTaskResult{agent: current, output: state.Response}, nil
 				}
 				if state.BackgroundPending {
@@ -192,7 +225,7 @@ func (a *App) monitorDeveloperTask(
 			return a.cancelHealthyStall(ctx, target, current, checkpoint, task)
 		}
 	}
-	a.debugf("watchdog deadline task=%q elapsed=%s", taskID, elapsed)
+	a.debugf("code=HTD-MON-005 watchdog deadline task=%q elapsed=%s", taskID, elapsed)
 	return developerTaskResult{}, fmt.Errorf("agy stayed working for 30 minutes; use recover_task after checking the right pane")
 }
 

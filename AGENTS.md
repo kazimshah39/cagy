@@ -4,7 +4,7 @@
 
 `herdr-tandem` is a small Go CLI for one visible two-agent workflow inside Herdr:
 
-- Codex or OpenCode is the supervisor in the current/left pane.
+- Codex (default), OpenCode, or agy is the supervisor in the current/left pane.
 - agy is the developer in a right pane.
 - Herdr shows one dynamic real-agent row in compact mode or both agents in expanded mode, using their native lifecycle state.
 
@@ -23,8 +23,8 @@ Do not turn this into a general multi-agent framework.
 
 - Use Herdr only. Never add tmux.
 - Do not add a persistent server daemon, network listener, hidden worker, queue, web UI, or general multi-agent framework to herdr-tandem. The provider service is an external prerequisite and is never launched or managed by herdr-tandem. Only the local stdio MCP child process (`herdr-tandem mcp-server`) is launched by herdr-tandem.
-- Support Codex and OpenCode as supervisors, and agy as the developer.
-- Launch Codex with its required YOLO/trust flags and launch OpenCode with its required permission bypass. Both receive supervisor instructions and the local MCP bridge through their adapters. Never send supervisor instructions as an initial user task.
+- Support Codex, OpenCode, and agy as supervisors, and agy as the developer.
+- Launch Codex with its required YOLO/trust flags, OpenCode with its required permission bypass, and agy supervisors with their runtime-scoped custom agent. All receive supervisor instructions and the local MCP bridge through their adapters. Never send supervisor instructions as an initial user task.
 - Always launch agy with `--dangerously-skip-permissions --mode accept-edits`.
 - Resume agy with the exact Herdr-reported conversation ID (`--conversation <id>`) plus the same YOLO flags. Never use ambiguous `--continue` when a prior session identity is available.
 - Do not add a safe-mode switch that removes these required flags.
@@ -58,7 +58,7 @@ Read `project-structure.md` before architecture changes and update it when a dec
 ## Herdr Workflow
 
 - The user starts `herdr-tandem` from an interactive shell pane inside Herdr.
-- Use the current pane for the selected supervisor (Codex by default, or OpenCode).
+- Use the current pane for the selected supervisor (Codex by default; OpenCode and agy are optional).
 - Split a visible pane to the right with the same project directory and `--no-focus`.
 - Start the named agy developer with `herdr agent start`. If agy shows its project trust screen with **Yes** selected, accept it visibly, then wait for `? for shortcuts` before launching the supervisor or sending work.
 - Require Herdr's current `antigravity-cli` integration before startup so agy's conversation ID is reported.
@@ -72,10 +72,11 @@ Read `project-structure.md` before architecture changes and update it when a dec
 
 ## Supervisor Workflow
 
-- The user talks to the selected supervisor.
+- The user talks to the selected supervisor. It owns requirements, read-only investigation, design, task scoping, review, and the final answer; it delegates bounded repository implementation and relevant automated tests by default, unless the user explicitly asks otherwise.
+- Each delegated task states the goal, relevant context and known scope, constraints, acceptance criteria, and checks to run. Split larger work into sequential tasks within the 30-minute limit; never paste secrets or guess file paths.
 - Codex, OpenCode, or agy delegates implementation using native herdr-tandem MCP tools (`delegate_task`, `task_status`, `recover_task`, `acknowledge_task`). Tasks arrive literally without shell interpolation.
 - `delegate_task` submits exactly once and returns after submission. A bounded monitor inside the stdio MCP process continues for up to 30 minutes; this is not a daemon, queue, or persistent worker.
-- The supervisor polls `task_status`, calls `recover_task` only after `completed_unacknowledged`, reviews the result, and then calls `acknowledge_task` with the returned receipt. It must never claim that the developer will report back automatically.
+- After `delegate_task` returns, the supervisor gives a brief progress update and ends its turn. It does not repeatedly poll `task_status` or keep a model turn open while the local monitor watches the developer. When the terminal-state wake arrives, it calls `task_status`, calls `recover_task` only after `completed_unacknowledged`, reviews the result, and then calls `acknowledge_task` with the returned receipt. It may check status when the user asks or a session is interrupted. The developer never reports back directly.
 - After the durable journal reaches `completed_unacknowledged`, `blocked`, or `uncertain`, the local monitor waits for the verified supervisor agent to become idle and submits one fixed terminal-state wake prompt. MCP startup repeats this recovery check for terminal journal state left by an earlier process. The wake prompt contains no task text, answer, receipt, or developer-controlled content.
 - Never keep an MCP request open for the full developer task and never depend on a client-specific long MCP timeout.
 - agy is not a native supervisor subagent; the selected supervisor interacts with agy through the local stdio MCP bridge.

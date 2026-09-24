@@ -78,7 +78,7 @@ func (a *App) newMCPServer() *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delegate_task",
-		Description: "Submit one implementation task to the visible agy developer; returns after submission while monitoring continues in the MCP process",
+		Description: "Delegate one bounded repository implementation or test task to the visible agy developer after scoping it; not for ordinary questions or read-only investigation. Returns after submission; end the supervisor turn and wait for the terminal-state wake instead of polling task_status. Then call task_status, recover_task, and acknowledge_task.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: boolPtr(false),
@@ -163,7 +163,7 @@ func (a *App) handleMCPDelegateTask(ctx context.Context, req *mcp.CallToolReques
 	a.debugf("code=HTD-MCP-002 mcp tool end name=%q task=%q ok=true status=%q", "delegate_task", taskID, "running")
 	return nil, DelegateTaskOutput{
 		Status:  "running",
-		Message: "task submitted exactly once; poll task_status until completion, then call recover_task",
+		Message: "task submitted exactly once; stop this turn and wait for the local monitor to wake you at a terminal state; do not poll task_status while running",
 	}, nil
 }
 

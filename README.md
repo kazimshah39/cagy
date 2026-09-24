@@ -100,12 +100,14 @@ Herdr currently supports one transient Agent view per server. Herdr Tandem uses 
 
 ## How it works
 
+The supervisor handles questions, read-only investigation, task scoping, and independent review. Unless you ask it not to delegate, it gives bounded repository implementation and relevant automated tests to agy, with the goal, constraints, acceptance criteria, and checks to run. Larger work is handled as sequential tasks, one at a time.
+
 1. Herdr Tandem validates Herdr, the selected supervisor, `agy`, and the provider service.
 2. It creates a project-scoped runtime record under `~/Library/Application Support/herdr-tandem/state` with the selected sidebar mode.
 3. It creates a visible right-hand developer pane, validates agy startup readiness within a 60-second window (accepting project trust if shown), and applies project-specific ownership, label, and visibility metadata.
 4. It starts Codex, OpenCode, or agy in the current pane with a local stdio MCP bridge. When agy is the supervisor, a temporary runtime-owned custom agent (`~/.gemini/config/agents/herdr-tandem-<runtime-id>/agent.md`) is prepared failure-atomically with `0700` directories and `0600` file permissions to supply the stdio MCP bridge and supervisor instructions without persistent global configuration; this artifact is unconditionally removed when the session exits or is stopped.
 5. The supervisor submits implementation work once through `delegate_task`. The call returns after bounded submission while the stdio MCP process monitors the developer for up to 30 minutes.
-6. The supervisor polls `task_status`. When the journal reaches a terminal state, the local monitor also waits for the verified supervisor to become idle and sends one fixed wake prompt so an idle supervisor cannot remain unaware of completion. A restarted MCP bridge repeats this check for pending terminal state.
+6. The supervisor ends its turn and stays idle while the local MCP monitor watches the developer without supervisor model calls. At a terminal state, the monitor waits for the verified supervisor to be idle and sends one fixed wake prompt. A restarted MCP bridge repeats this check for pending terminal state. The supervisor may check `task_status` if the user asks for an update or a session is interrupted.
 7. When `task_status` reports `completed_unacknowledged`, `recover_task` returns the exact transcript answer and delivery receipt without resubmitting.
 8. After reviewing the output, the supervisor calls `acknowledge_task(receipt="...")` to clear durable task state.
 9. The provider service owns account selection, quota handling, and fallback.

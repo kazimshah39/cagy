@@ -51,11 +51,13 @@ A bounded goroutine inside the existing stdio `herdr-tandem mcp-server` process 
 
 After the journal reaches `completed_unacknowledged`, `blocked`, or `uncertain`, the monitor validates the supervisor pane ownership, workspace, tab, project, and agent kind. It waits for that supervisor to become idle, then submits one fixed wake prompt telling it to call `task_status`. MCP startup performs the same check for terminal journal state left by a prior process. This event-driven wake uses no task text, answer, receipt, transcript, or developer-controlled content and avoids relying on a nonexistent passive developer report.
 
+The supervisor handles requirements, read-only investigation, design decisions, task scoping, independent review, and the final answer. Unless the user asks otherwise, it delegates bounded repository implementation and relevant automated tests to agy. Each task gives the goal, known scope and constraints, acceptance criteria, and checks to run; larger work is split into sequential tasks that fit the 30-minute deadline. Acknowledgment clears delivery state, not quality review.
+
 The supervisor workflow is:
 
 1. Call `task_status` before new work.
 2. Call `delegate_task` once.
-3. Poll `task_status` while it reports `submitting` or `running`; never stop on the assumption that the developer will report back. A verified terminal-state wake provides a second recovery path if the supervisor becomes idle.
+3. End the supervisor turn after submission; the local monitor watches the developer without supervisor model calls. Do not repeatedly poll `task_status` while the task is running. The verified terminal-state wake returns the supervisor to work; the developer does not report back directly. Check status on user request or after an interrupted session.
 4. Call `recover_task` when status is `completed_unacknowledged`.
 5. Review the result and tests.
 6. Call `acknowledge_task` with the recovery receipt.

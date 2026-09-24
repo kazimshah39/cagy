@@ -129,3 +129,55 @@ func TestTrackedCompletionPreservesAlreadyPersistedRecoveryReceipt(t *testing.T)
 		t.Fatalf("receipt changed during finalization: got %q want %q", updated.DeliveryReceipt, receipt)
 	}
 }
+
+func TestValidateTaskString(t *testing.T) {
+	tests := []struct {
+		name    string
+		task    string
+		wantErr string
+	}{
+		{
+			name:    "empty string rejected",
+			task:    "",
+			wantErr: "task cannot be empty",
+		},
+		{
+			name:    "whitespace-only string rejected",
+			task:    "   \t\r\n   ",
+			wantErr: "task cannot be empty",
+		},
+		{
+			name:    "valid task accepted",
+			task:    "run unit tests",
+			wantErr: "",
+		},
+		{
+			name:    "exactly 1 MiB nonblank task accepted",
+			task:    strings.Repeat("a", maxTaskInputBytes),
+			wantErr: "",
+		},
+		{
+			name:    "1 MiB plus one byte rejected",
+			task:    strings.Repeat("a", maxTaskInputBytes+1),
+			wantErr: "task exceeds 1 MiB",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTaskString(tc.task)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("%s: expected error %q, got nil", tc.name, tc.wantErr)
+				}
+				if err.Error() != tc.wantErr {
+					t.Fatalf("%s: got error %q, want %q", tc.name, err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", tc.name, err)
+			}
+		})
+	}
+}

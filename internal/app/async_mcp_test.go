@@ -245,7 +245,7 @@ func TestMCPDelegateTaskReturnsAfterOneSubmissionAndMonitoringSurvivesRequestCan
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Status != "running" || !strings.Contains(out.Message, "poll task_status") {
+	if out.Status != "running" || !strings.Contains(out.Message, "wait for the local monitor to wake you") || !strings.Contains(out.Message, "do not poll task_status") {
 		t.Fatalf("delegate output=%+v", out)
 	}
 	if runner.prompts() != 1 {

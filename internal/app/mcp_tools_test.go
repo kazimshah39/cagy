@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,11 +30,15 @@ func TestMCPExposesOnlyProviderManagedModeWorkflowTools(t *testing.T) {
 	defer clientSession.Close()
 
 	var names []string
+	var delegateDescription string
 	for tool, err := range clientSession.Tools(ctx, nil) {
 		if err != nil {
 			t.Fatal(err)
 		}
 		names = append(names, tool.Name)
+		if tool.Name == "delegate_task" {
+			delegateDescription = tool.Description
+		}
 	}
 	want := []string{"delegate_task", "task_status", "recover_task", "acknowledge_task", "forget_task", "developer_status"}
 	if len(names) != len(want) {
@@ -42,6 +47,11 @@ func TestMCPExposesOnlyProviderManagedModeWorkflowTools(t *testing.T) {
 	for _, name := range want {
 		if !slices.Contains(names, name) {
 			t.Fatalf("missing MCP tool %q in %v", name, names)
+		}
+	}
+	for _, required := range []string{"bounded repository implementation or test task", "not for ordinary questions or read-only investigation", "end the supervisor turn", "wait for the terminal-state wake instead of polling task_status", "recover_task", "acknowledge_task"} {
+		if !strings.Contains(delegateDescription, required) {
+			t.Errorf("delegate_task description missing %q: %q", required, delegateDescription)
 		}
 	}
 	for _, forbidden := range []string{"accounts", "switch_account", "quota"} {
